@@ -1,0 +1,486 @@
+/*
+ls  LiSt directories for QDOS
+Copyright (c), 1992, HaPeSu (Hans-Peter Sulzer, Fuerth, W.-Germany)
+Ported to qdos-gcc; sorted listing and safety fixes, 2026.
+Original C68 source preserved in ls_original_c.
+SPDX-License-Identifier: GPL-1.0-or-later
+License grant: Peter Sulzer's "ls Program for QDOS" documentation.
+See COPYING and docs/ls Program for QDOS.pdf.
+This modified version was developed in 2026; changes are described in README.md.
+*/
+
+#include <stdlib.h>
+#include <ctype.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <qdos.h>
+/* #include "ufb_h" */
+
+#define MYMAX 260 /* My max. pathname length */
+#define WNNAM 1   /* Wildname must be first name passed */
+#define TYPEOPT 1 /* Types of files must be the first option */
+#define SDATLEN 26 /* Length to hold string with QDOS-date for cn_date */
+
+char *_endmsg = NULL;
+char _prog_name[] = "ls";
+
+long _stack = 4L * 1024L; /* max. stacksize */
+long _mneed = 16L * 1024L; /* max. memory for malloc() */
+
+int own_con; /* set to != 0 if stdout is CON-channel and not redirected */
+int is_con;  /* set to != 0 if stdout is a CON-cannel */
+int width; /* no. of columns, get from window, else default 80 cols */
+
+/* Global vars, to ease debugging */
+int  irqdrslt   /* result of read_qdir() */
+    ,type       /* type of progs to read (exe-prog, data, ...) */
+    ;
+chanid_t chid       /* QDOS channel-id */
+    ;
+struct qdirect
+     retdir     /* to read directory structure into with read_qdir() */
+    ;
+char retnam[MYMAX]  /* buffer for name returned by read_qdir() */
+    ,wcdefault[]="*"/* default wildcard is all files in current dir */
+    ,*wc            /* pointer to wildcard name passed */
+    ,sdate[SDATLEN] /* buffer for date as string for cn_date */
+    ,directory[MYMAX+2] /* for name of directory to list */
+    ;
+struct QLRECT
+     sowin  /* stdout window size and cursor position */
+    ,bigwin = {512,256,0,0} /* big window, when not redirected */
+    ;
+
+#define OPTION_T 0
+#define OPTION_l 1
+#define OPTION_e 2
+#define OPTION_HELP 3
+#define OPTION_x 4
+#define OPTION_r 5
+#define OPTION_t 6
+#define OPTION_S 7
+#define OPTION_s 8
+#define MAXOPTS 9 /* max no. of options */
+char opt_table[MAXOPTS+1]; /* options table */
+char *opt_nams[]={
+     "T" /* 0 file-Types to read (as in read_qdir()) */
+    ,"l" /* 1 Long, i.e. all infos about file */
+    ,"e" /* 2 special name, i.e. required for names starting with '-' */
+    ,"?" /* 3 help */
+    ,"x" /* 4 output in columns side by side */
+    ,"r" /* reverse sort */
+    ,"t" /* newest first */
+    ,"S" /* largest first */
+    ,"s" /* names only */
+    ,""  /* end of options */
+};
+
+/* function prototypes: */
+
+int main (int,char**);
+short curcol (long,struct QLRECT*);
+void sp_ent (void);
+void usage (void);
+int hps_err (int,char*,int);
+int is_own_con (void);
+
+
+
+/* Compare bounded, non-NUL-terminated QDOS header names. */
+static int entry_compare(const void *va, const void *vb)
+{
+    const struct qdirect *a = va, *b = vb;
+    unsigned int i, n;
+    int result = 0;
+    if (opt_table[OPTION_t] && a->d_update != b->d_update)
+        result = (unsigned long)a->d_update > (unsigned long)b->d_update ? -1 : 1;
+    else if (opt_table[OPTION_S] && a->d_length != b->d_length)
+        result = a->d_length > b->d_length ? -1 : 1;
+    if (!result) {
+        n = a->d_szname < b->d_szname ? a->d_szname : b->d_szname;
+        for (i = 0; i < n; ++i) {
+            unsigned int ca = (unsigned char)a->d_name[i];
+            unsigned int cb = (unsigned char)b->d_name[i];
+            /* C68's tolower macro shares _ctypetemp: never combine two
+             * expansions in one expression. QDOS names use ASCII folding. */
+            if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+            if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+            result = (int)ca - (int)cb;
+            if (result) break;
+        }
+        if (!result) result = (int)a->d_szname - (int)b->d_szname;
+        if (!result) result = memcmp(a->d_name, b->d_name, n);
+    }
+    return opt_table[OPTION_r] ? -result : result;
+}
+
+/* Recognize standard directories and the older CST/Thor header types.
+ * Legacy types count as directories only when their length is a multiple of 64,
+ * matching C68's directory filter. */
+static int directory_entry(const struct qdirect *entry)
+{
+    return entry->d_type == QF_DIR_TYPE ||
+        ((entry->d_type == CST_DIR_TYPE || entry->d_type == THOR_DIR_TYPE) &&
+         entry->d_length % 64 == 0);
+}
+
+static int display_length(const struct qdirect *entry)
+{
+    return entry->d_szname + (directory_entry(entry) ? 3 : 0);
+}
+
+/* Shell sort avoids callbacks into GCC code from the C68 assembler library.
+ * It uses constant extra space and moves complete QDOS headers together. */
+static void sort_entries(struct qdirect *entries, size_t count)
+{
+    size_t gap, i, j;
+    struct qdirect item;
+    for (gap = count / 2; gap != 0; gap /= 2) {
+        for (i = gap; i < count; ++i) {
+            item = entries[i];
+            for (j = i; j >= gap &&
+                    entry_compare(&entries[j-gap], &item) > 0; j -= gap)
+                entries[j] = entries[j-gap];
+            entries[j] = item;
+        }
+    }
+}
+
+static void spaces(int n)
+{
+    while (n-- > 0) putchar(' ');
+}
+
+int main(argc,argv)
+    int     argc;
+    char    *argv[];
+{
+int  options    /* no. of options (starting with '-') passed */
+    ,i          /* loop counter */
+    ,namno      /* perhaps no more required */
+    ,optno      /* current option */
+    ,irorre     /* read reverse, integer error */
+    ,cols       /* no. of columns of filenames for x-option */
+    ;
+struct qdirect *entries = NULL, *grown;
+char open_directory[MYMAX+2];
+char *wild_start;
+size_t count = 0, capacity = 0, entry;
+short
+     longest_name /* longest filename in directory */
+
+    ;
+long id     /* channel id of stdout */
+    ,dirtest /* channel id to test if wild name is a directory */
+    ;
+
+options = namno = optno = 0; /* no options, no names yet */
+own_con = is_own_con();
+/* Shared SuperBASIC windows must show output as it is produced, rather than
+ * holding an entire help/listing block until exit. Do this before any I/O. */
+if (isnoclose(fileno(stdout)) > 0) setbuf(stdout, NULL);
+if (isnoclose(fileno(stderr)) > 0) setbuf(stderr, NULL);
+id = fgetchid(stdout); /* get channel id of stdout */
+is_con = iscon(id,-1);
+if (own_con){ /* own console channel and not redirected */
+    irorre = sd_wdef(id,-1,RED_M4,1,&bigwin);
+    sd_clear(id,-1); /* clear window */
+}
+width = 80; /* default is 80 chars per line */
+if (is_con){ /* window output get chars per line */
+    sd_chenq(id,-1,&sowin); /* get window sizes, cursor position */
+    width = (int)sowin.q_width;
+}
+
+for (i=0; i<=MAXOPTS; i++)
+    opt_table[i] = '\0';
+opt_table[OPTION_l] = 1; /* compact size/date listing is the default */
+
+/* Now process all names and options: */
+wc = wcdefault;
+type = 0; /* default types are all files */
+
+/* parse command line: */
+for (i = 1; i < argc; i++){ /* all arguments passed */
+    if (*argv[i] == '-'){ /* option found */
+        ++argv[i];
+        for(optno=0; *opt_nams[optno] != '\0'; optno++){ /* all allowed opt's */
+            if (strstr(argv[i],opt_nams[optno]) != argv[i]) /* not this opt */
+                continue; /* with next option in table */
+            if (optno != OPTION_T && optno != OPTION_e && argv[i][1])
+                hps_err(2,argv[i],ERR_BP);
+            switch (optno){
+            case OPTION_T:
+                if (++opt_table[optno] > 1)
+                    hps_err(1,opt_nams[optno],ERR_BP); /* ...oops, abort */
+                ++argv[i];
+                if (!isdigit((unsigned char)*argv[i]) || argv[i][1])
+                    hps_err(3,"",ERR_BP);
+                type=atoi(argv[i]);
+                switch (type){
+                case 0:  case 1:  case 2:  case 4:
+                    break;
+                default: /* wrong type */
+                    hps_err(3,"",ERR_BP); /* abort */
+                    break;
+                }
+                break;
+            case OPTION_r:
+            case OPTION_t:
+            case OPTION_S:
+                if (argv[i][1]) hps_err(2,argv[i],ERR_BP);
+                opt_table[optno] = 1;
+                if (optno == OPTION_t) opt_table[OPTION_S] = 0;
+                if (optno == OPTION_S) opt_table[OPTION_t] = 0;
+                break;
+            case OPTION_s:
+                opt_table[OPTION_l] = 0;
+                opt_table[OPTION_x] = 0;
+                break;
+            case OPTION_l:
+                opt_table[OPTION_x] = 0; /* reset (ignore) columnar output */
+                opt_table[optno] = 1; /* multiple -l options ignored */
+                break;
+            case OPTION_e:
+                if (++opt_table[optno] > 1)
+                    hps_err(1,opt_nams[optno],ERR_BP); /* ...oops, abort */
+                ++namno;
+                if (namno > 1)
+                    hps_err(8,"-e",ERR_BP);
+                wc = ++argv[i];
+                break;
+            case OPTION_HELP:
+                usage();
+                return 0;
+                break;
+            case OPTION_x:
+                opt_table[OPTION_l] = 0;
+                opt_table[OPTION_x] = 1;
+                break;
+            default: /* unknown option */
+                hps_err(2,argv[i],ERR_BP); /* ...oops, abort */
+                break;
+            }
+
+            goto NEXT_CMDLIN_ARG; /* parse next commandline argument */ /*
+v-------------------------------- */
+
+        }
+        /* if (*opt_nams[optno] == '\0') */ /* unknown option */
+            hps_err(2,argv[i],ERR_BP); /* abort */
+    }
+    else{ /* a name was found */
+        namno++; /* increase name number */
+        if (namno > 1){ /* too many names */
+            if (opt_table[OPTION_e])
+                hps_err(8,"-e",ERR_BP);
+            hps_err(5,"",ERR_BP); /* with bad parameter */
+        }
+        switch(namno){ /* switch on no. of name passed */
+        case WNNAM: /* the wildcard "name" was found */
+            wc = argv[i]; /* "get" wildcard name */
+            break;
+        default: /* ... oops, this is a system error */
+            printf("\nSystem error, too many names in switch() { ...\n");
+            sp_ent();
+            exit(ERR_NC);
+            break;
+        }
+    }
+NEXT_CMDLIN_ARG:
+    ;
+}
+
+if (strlen(wc) >= MYMAX) hps_err(10,"",ERR_BP);
+strncpy(directory,wc,(size_t)MYMAX);
+directory[MYMAX-1] = '\0'; /* safety first */
+dirtest = io_open(directory,DIROPEN);
+if (dirtest >= 0L){ /* wildcard name is a directory */
+    strcat(directory,"*"); /* append wildcard "*" for list all files */
+    io_close(dirtest);
+}
+else{
+    dirtest = io_open(directory,OLD_EXCL);
+    if (dirtest < 0){ /* if NO file with name supplied by user exists */
+        strcat(directory,"_"); /* test if user forgot underscore for a dir */
+        dirtest = io_open(directory,DIROPEN);
+        if (dirtest >= 0){ /* wildcard name + '_' is a directory */
+            strcat(directory,"*"); /* append wildcard "*" for list all files */
+            io_close(dirtest);
+        }
+        else{ /* no directory, so remove trailing underscore we have added */
+            strncpy(directory,wc,(size_t)MYMAX);
+            directory[MYMAX-1] = '\0'; /* safety first */
+        }
+    }
+    else /* the file with name supplied by user exists */
+        io_close(dirtest);
+}
+/* Directory drivers need a directory/prefix, not a wildcard filename.
+ * SNL interprets '*' literally at OPEN time; read_qdir filters it later. */
+strcpy(open_directory, directory);
+wild_start = strpbrk(open_directory, "*?[");
+if (wild_start) *wild_start = '\0';
+chid = open_qdir(open_directory);
+if (chid < 0L)
+    hps_err(6,"",chid);
+
+/* Read once, retain complete headers, then sort the listing. */
+longest_name = 0;
+for (;;) {
+    irqdrslt = read_qdir(chid,directory,retnam,&retdir,type);
+    if (irqdrslt < 0) hps_err(7,"",ERR_FE);
+    if (!irqdrslt) break;
+    if (retdir.d_szname > sizeof(retdir.d_name))
+        hps_err(7,"",ERR_FE);
+    if (count == capacity) {
+        size_t next = capacity ? capacity * 2 : 32;
+        if (next <= capacity || next > (size_t)-1 / sizeof(*entries))
+            hps_err(9,"",ERR_OM);
+        grown = realloc(entries, next * sizeof(*entries));
+        if (!grown) hps_err(9,"",ERR_OM);
+        entries = grown;
+        capacity = next;
+    }
+    entries[count++] = retdir;
+    if (longest_name < display_length(&retdir))
+        longest_name = display_length(&retdir);
+}
+io_close(chid);
+if (count > 1) sort_entries(entries, count);
+longest_name += 2;
+cols = opt_table[OPTION_x] ? width / longest_name : 1;
+if (cols < 1) cols = 1;
+/* Separate from preceding DIR/PRINT output. Finish a partial screen line
+ * first, then emit exactly one blank separator before a nonempty listing. */
+if (count != 0) {
+    if (is_con && curcol(id, &sowin) > 0) putchar('\n');
+    putchar('\n');
+}
+for (entry = 0; entry < count; ++entry) {
+    retdir = entries[entry];
+    fwrite(retdir.d_name,1,retdir.d_szname,stdout);
+    if (directory_entry(&retdir)) fputs(" ->", stdout);
+    if (opt_table[OPTION_l]) {
+        unsigned long bytes = retdir.d_length >= 64 ? retdir.d_length - 64 : 0;
+        spaces(longest_name - display_length(&retdir));
+        printf("%8lu  ", bytes);
+        if (retdir.d_update) {
+            /* cn_date: YYYY Mon DD HH:MM:SS. Omit seconds. */
+            printf("%.17s", cn_date(sdate, retdir.d_update));
+        } else {
+            putchar('-'); /* No modification date recorded. */
+        }
+    }
+    if ((entry + 1) % cols == 0 || entry + 1 == count)
+        putchar('\n');
+    else
+        spaces(longest_name - display_length(&retdir));
+}
+free(entries);
+
+/* @@@ */ /* printf("_ufbs=%x",(int)(_ufbs[0].ufbflg); */
+sp_ent();
+return(0); /* prog terminated normally */
+}
+
+
+short curcol(id,win) /* set window size/curpos, return current cursor column */
+    long id;
+    struct QLRECT *win;
+{
+int  err
+    ;
+err = sd_chenq(id,-1,win);
+return err ? (short)err : win->q_x;
+}
+
+
+int hps_err(irorre,msg,qdos_error)
+    int  irorre; /* read reverse (error type is integer) */
+    char *msg;   /* additional message */
+    int  qdos_error; /* if != 0 function aborts */
+{
+static char *error_message[] = {
+    /* 0 */  "" /* NO ERROR, i.e. a dummy */
+    /* 1 */ ,"too many -%s options"
+    /* 2 */ ,"unknown option -%s"
+    /* 3 */ ,"in -Tn n must be 0, 1, 2 or 4"
+    /* 4 */ ,"option %s needs an int argument"
+    /* 5 */ ,"too many filenames"
+    /* 6 */ ,"can't open directory"
+    /* 7 */ ,"error when reading"
+    /* 8 */ ,"%s option AND name not allowed"
+    /* 9 */ ,"not enough memory to sort directory"
+    /* 10 */ ,"pathname too long"
+};
+fprintf(stderr,"\nls (%d): ",irorre);
+fprintf(stderr,error_message[irorre],msg);
+fprintf(stderr,"\nls -? for help\n");
+if (qdos_error){
+    sp_ent();
+    exit(qdos_error);
+}
+return 0;
+}
+
+void usage(void)
+{
+    static const char help[] =
+        "ls [-options] [device_directory_or_pattern]\n"
+        "Default: name, size, date; alphabetical order\n"
+        "-r reverse    -t newest first    -S largest first\n"
+        "-s names only  -l size/date  -x columns  -? help\n"
+        "-T0 all  -T1 data  -T2 programs  -T4 directories\n"
+        "Use separate options: -l -r win1_\n"
+        "Shared window: EW snl4_ls,#1,#1,#1;\"win1_\"\n"
+        "No name: current data directory; -e-name: leading '-'\n";
+    fputs(help, stdout);
+    fflush(stdout);
+    sp_ent();
+}
+
+
+void sp_ent(){ /* press Space or Enter, then continue if stdin is a CON_ */
+
+int  irorre1;
+long id;
+char c;
+
+id = fgetchid(stdout);
+if (own_con){
+    fflush(stdout);
+    if ((irorre1=curcol(id,&sowin)) != 0){ /* cursor not in column 0 */
+        putchar('\n');
+    }
+    fprintf(stdout,"Press SPACE or ENTER to continue ...");
+    fflush(stdout);
+    for(;;){ /* ever */
+        irorre1 = sd_cure(id,-1);
+        if (irorre1)
+            return;
+        irorre1 = io_fbyte(id,-1,&c);
+        sd_curs(id,-1);
+        if (c == ' ' || c == '\n' || irorre1){
+            putc('\n',stdout);
+            return;
+        }
+    }
+}
+}
+
+
+int is_own_con(){ /* return != 0 if con-channel and not redirected */
+
+long id;
+
+id = fgetchid(stdout);
+if(isatty(fileno(stdout)) && !isnoclose(fileno(stdout))) {
+    if (iscon(id,-1)){ /* make absolutely sure that stdout is a CON-channel */
+        return 1;
+    }
+}
+return 0;
+}
+

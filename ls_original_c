@@ -1,0 +1,455 @@
+/*
+ls  LiSt directories for QDOS
+Copyright (c), 1992, HaPeSu (Hans-Peter Sulzer, Fuerth, W.-Germany)
+COMPILE with C68 V2.00, needs module cndate.o
+*/
+
+#include <ansi.h>
+#include <stdio.h>
+#include <string.h>
+#include <qlib.h>
+#include <qdos.h>
+/* #include "ufb_h" */
+
+#define MYMAX 260 /* My max. pathname length */
+#define WNNAM 1   /* Wildname must be first name passed */
+#define TYPEOPT 1 /* Types of files must be the first option */
+#define SDATLEN 26 /* Length to hold string with QDOS-date for cn_date */
+#define LONG_2_FORM 2 /* 2 lines per dir entry for -l option */
+#define LONG_3_FORM 3 /* 3 lines per dir entry for -l option */
+
+char *_endmsg = NULL;
+char _prog_name[] = "ls";
+
+long _STACK = 4L * 1024L; /* max. stacksize */
+long _MNEED = 8L * 1024L; /* max. memory for malloc() */
+
+int own_con; /* set to != 0 if stdout is CON-channel and not redirected */
+int is_con;  /* set to != 0 if stdout is a CON-cannel */
+int width; /* no. of columns, get from window, else default 80 cols */
+
+/* Global vars, to ease debugging */
+int  irqdrslt   /* result of read_qdir() */
+    ,type       /* type of progs to read (exe-prog, data, ...) */
+    ;
+chanid_t chid       /* QDOS channel-id */
+    ;
+struct qdirect
+     retdir     /* to read directory structure into with read_qdir() */
+    ;
+char retnam[MYMAX]  /* buffer for name returned by read_qdir() */
+    ,wcdefault[]="*"/* default wildcard is all files in current dir */
+    ,*wc            /* pointer to wildcard name passed */
+    ,sdate[SDATLEN] /* buffer for date as string for cn_date */
+    ,directory[MYMAX+2] /* for name of directory to list */
+    ;
+char fnfill[] =     /* filename fill string */
+    "                                      "
+  /* 12345678901234567890123456789012345678 */
+    ;
+struct QLRECT
+     sowin  /* stdout window size and cursor position */
+    ,bigwin = {512,256,0,0} /* big window, when not redirected */
+    ;
+
+#define OPTION_T 0
+#define OPTION_l 1
+#define OPTION_e 2
+#define OPTION_HELP 3
+#define OPTION_x 4
+#define MAXOPTS 5 /* max no. of options */
+char opt_table[MAXOPTS+1]; /* options table */
+char *opt_nams[]={
+     "T" /* 0 file-Types to read (as in read_qdir()) */
+    ,"l" /* 1 Long, i.e. all infos about file */
+    ,"e" /* 2 special name, i.e. required for names starting with '-' */
+    ,"?" /* 3 help */
+    ,"x" /* 4 output in columns side by side */
+    ,""  /* end of options */
+};
+
+/* function prototypes: */
+
+int main _PROTOTYPE((int,char**));
+short curcol _PROTOTYPE((long,struct QLRECT*));
+void sp_ent _PROTOTYPE((void));
+void usage _PROTOTYPE((void));
+int hps_err _PROTOTYPE((int,char*,int));
+int is_own_con _PROTOTYPE((void));
+int cn_date _PROTOTYPE((char*,long));
+
+
+int main(argc,argv)
+    int     argc;
+    char    *argv[];
+{
+int  options    /* no. of options (starting with '-') passed */
+    ,i          /* loop counter */
+    ,namno      /* perhaps no more required */
+    ,optno      /* current option */
+    ,lform      /* outputform for -l; 1=3 lines, 2=2 lines per dir-entry */
+    ,irorre     /* read reverse, integer error */
+    ,cols       /* no. of columns of filenames for x-option */
+    ,dummy
+    ;
+short
+     longest_name /* longest filename in directory */
+    ,ready
+    ;
+long id     /* channel id of stdout */
+    ,dirtest /* channel id to test if wild name is a directory */
+    ,lrorre /* read reverse, long error */
+    ;
+
+options = namno = optno = 0; /* no options, no names yet */
+own_con = is_own_con();
+id = fgetchid(stdout); /* get channel id of stdout */
+is_con = iscon(id,-1);
+if (own_con){ /* own console channel and not redirected */
+    irorre = sd_wdef(id,-1,RED_M4,1,&bigwin);
+    sd_clear(id,-1); /* clear window */
+}
+width = 80; /* default is 80 chars per line */
+if (is_con){ /* window output get chars per line */
+    sd_chenq(id,-1,&sowin); /* get window sizes, cursor position */
+    width = (int)sowin.q_width;
+}
+
+/* some initialisations: */
+lform = LONG_3_FORM;
+
+for (i=0; i<=MAXOPTS; i++)
+    opt_table[i] = '\0';
+
+/* Now process all names and options: */
+wc = wcdefault;
+type = 0; /* default types are all files */
+
+/* parse command line: */
+for (i = 1; i < argc; i++){ /* all arguments passed */
+    if (*argv[i] == '-'){ /* option found */
+        ++argv[i];
+        for(optno=0; *opt_nams[optno] != '\0'; optno++){ /* all allowed opt's */
+            if (strstr(argv[i],opt_nams[optno]) != argv[i]) /* not this opt */
+                continue; /* with next option in table */
+            switch (optno){
+            case OPTION_T:
+                if (++opt_table[optno] > 1)
+                    hps_err(1,opt_nams[optno],ERR_BP); /* ...oops, abort */
+                ++argv[i];
+                if (!isdigit(*argv[i]))
+                    hps_err(3,"",ERR_BP);
+                type=atoi(argv[i]);
+                switch (type){
+                case 0:  case 1:  case 2:  case 4:
+                    break;
+                default: /* wrong type */
+                    hps_err(3,"",ERR_BP); /* abort */
+                    break;
+                }
+                break;
+            case OPTION_l:
+                opt_table[OPTION_x] = 0; /* reset (ignore) columnar output */
+                opt_table[optno] = 1; /* multiple -l options ignored */
+                break;
+            case OPTION_e:
+                if (++opt_table[optno] > 1)
+                    hps_err(1,opt_nams[optno],ERR_BP); /* ...oops, abort */
+                ++namno;
+                if (namno > 1)
+                    hps_err(8,"-e",ERR_BP);
+                wc = ++argv[i];
+                break;
+            case OPTION_HELP:
+                usage();
+                exit(0);
+                break;
+            case OPTION_x:
+                if (opt_table[OPTION_l]) /* ignore this option with option -l */
+                    break;
+                if (!opt_table[optno])
+                    opt_table[OPTION_x] = 1;
+                break;
+            default: /* unknown option */
+                hps_err(2,argv[i],ERR_BP); /* ...oops, abort */
+                break;
+            }
+
+            goto NEXT_CMDLIN_ARG; /* parse next commandline argument */ /*
+v-------------------------------- */
+
+        }
+        /* if (*opt_nams[optno] == '\0') */ /* unknown option */
+            hps_err(2,argv[i],ERR_BP); /* abort */
+    }
+    else{ /* a name was found */
+        namno++; /* increase name number */
+        if (namno > 1){ /* too many names */
+            if (opt_table[OPTION_e])
+                hps_err(8,"-e",ERR_BP);
+            hps_err(5,"",ERR_BP); /* with bad parameter */
+        }
+        switch(namno){ /* switch on no. of name passed */
+        case WNNAM: /* the wildcard "name" was found */
+            wc = argv[i]; /* "get" wildcard name */
+            break;
+        default: /* ... oops, this is a system error */
+            printf("\nSystem error, too many names in switch() { ...\n");
+            sp_ent();
+            exit(ERR_NC);
+            break;
+        }
+    }
+NEXT_CMDLIN_ARG:
+}
+
+strncpy(directory,wc,(size_t)MYMAX);
+directory[MYMAX-1] = '\0'; /* safety first */
+dirtest = io_open(directory,DIROPEN);
+if (dirtest >= 0L){ /* wildcard name is a directory */
+    strcat(directory,"*"); /* append wildcard "*" for list all files */
+    io_close(dirtest);
+}
+else{
+    dirtest = io_open(directory,OLD_EXCL);
+    if (dirtest < 0){ /* if NO file with name supplied by user exists */
+        strcat(directory,"_"); /* test if user forgot underscore for a dir */
+        dirtest = io_open(directory,DIROPEN);
+        if (dirtest >= 0){ /* wildcard name + '_' is a directory */
+            strcat(directory,"*"); /* append wildcard "*" for list all files */
+            io_close(dirtest);
+        }
+        else{ /* no directory, so remove trailing underscore we have added */
+            strncpy(directory,wc,(size_t)MYMAX);
+            directory[MYMAX-1] = '\0'; /* safety first */
+        }
+    }
+    else /* the file with name supplied by user exists */
+        io_close(dirtest);
+}
+chid = open_qdir(directory); /* open directory */
+if (chid < 0L)
+    hps_err(6,"",chid);
+
+/* first send new line if con-channel and cursor not at start of new line: */
+if (is_con)
+    if (curcol(id,&sowin) != 0) /* gets also win size a. cursor pos. (chars) */
+        putchar('\n');
+
+/* when columnar output, scan dir for longest name: */
+longest_name = 0;
+if (opt_table[OPTION_x]){
+    int pos;
+    /* following if(...)-clause may be removed when tested: */
+    if (opt_table[OPTION_l]){
+        printf("\nSystem error: -x detected together with -l! Tell author!\n");
+        sp_ent();
+        exit(ERR_NC);
+    }
+    for (;;){ /* ever */
+        irqdrslt = read_qdir(chid,directory,retnam,&retdir,type);
+        if (irqdrslt == -1) /* error when reading */
+            hps_err(7,"",ERR_FE);
+        if (irqdrslt == 0) /* EOF */
+            break; /* with reading directory entries */
+        if (longest_name < retdir.d_szname)
+            longest_name = retdir.d_szname;
+    }
+    irorre = fs_pos(chid,0L,0); /* rewind to top of directory */
+    longest_name += 2; /* at least 2 spaces between columns, because 1 */
+                       /* may be needed for '*' (_exe) or '/' (dir's) */
+                       /* (see UNIX-guide for "ls -F") (not yet implemented) */
+    cols = width / longest_name;
+}
+else {
+    cols = 1;
+    lform = LONG_3_FORM; /* 3 lines per dir entry (for -l) is default */
+    if (width >= 80 || !is_con) /* if >= 80 cols or fileoutput */
+            lform = LONG_2_FORM; /* 2 lines per dir-entry */
+}
+/* printf("longest_name=%d  width=%d  cols=%d\n",longest_name,(int)width,cols);
+*/
+ready = 0;
+do{ /* read dir entries */
+    int i, pad;
+    for (i=0; ;){
+        irqdrslt = read_qdir(chid,directory,retnam,&retdir,type);
+        if (irqdrslt == -1) /* error when reading */
+            hps_err(7,"",ERR_FE);
+        if (irqdrslt == 0){ /* EOF */
+            ready = 1;
+            break; /* with reading directory entries */
+        }
+        /* Now output the directory infos: */
+        fwrite(retdir.d_name,(size_t)retdir.d_szname,(size_t)1,stdout);
+        ++i;
+        if (i < cols){
+            pad = longest_name - retdir.d_szname;
+            fnfill[pad] = '\0';
+            printf("%s",fnfill);
+            irorre = 0; /* dummy because of bug */
+            fnfill[pad] = ' ';
+        }
+        else
+            break;
+    }
+    if (opt_table[OPTION_l] && irqdrslt){
+        if (lform == LONG_3_FORM){
+            printf("\n%02x %02x %8ld %8ld %08x",
+                (int)retdir.d_access,(int)retdir.d_type,
+                (int)(retdir.d_length-64),retdir.d_datalen,retdir.d_reserved);
+            printf("  %5ld\n",
+                (long) *((short*)&retdir.d_refdate)); /* version number */
+
+            /* for C68 cn_date() version: cn_date(retdir.d_update,sdate);
+            printf("%s  ",sdate); */ /* update date, next printf() for my cn_date */
+            printf("%s  ",cn_date(sdate,retdir.d_update)); /* update date */
+            /* cn_date(retdir.d_backup,sdate);
+            printf("%s",sdate); */ /* backup date */
+            printf("%s",cn_date(sdate,retdir.d_backup)); /* backup date */
+        }
+        else if (lform == LONG_2_FORM){
+            int pad;
+            /* make fill string, so that next output is on fixed column: */
+            pad = 37 - retdir.d_szname;
+            fnfill[pad] = '\0';
+            printf("%s%02x %02x %8ld %8ld %08x %5ld %04x",fnfill,
+                (int)retdir.d_access,(int)retdir.d_type,(retdir.d_length-64),
+                retdir.d_datalen,retdir.d_reserved,
+                (long) *((short*)&retdir.d_refdate), /* version number */
+                (short)retdir.d_refdate); /*word after version number*/
+
+            /* for C68 cn_date() version: */ /* cn_date(retdir.d_update,sdate);
+            printf("\n  %s",sdate); */ /* updatedate */
+            printf("\n  %s",cn_date(sdate,retdir.d_update)); /* updatedate */
+            /* cn_date(retdir.d_backup,sdate);
+            printf("  %s",sdate); */  /* backupdate */
+            printf("  %s",cn_date(sdate,retdir.d_backup)); /* backupdate */
+            fnfill[pad] = ' '; /* clear fill string */
+        }
+        else {
+            printf("\nSystem error: lform out of range! Report to author!\n");
+            sp_ent();
+            exit(ERR_NC);
+        }
+    }
+    if (ready)
+        break;
+    putchar('\n');
+}while (1);
+
+io_close(chid); /* close dir-channel */
+/* @@@ */ /* printf("_ufbs=%x",(int)(_ufbs[0].ufbflg)); */
+sp_ent();
+return(0); /* prog terminated normally */
+}
+
+
+short curcol(id,win) /* set window size/curpos, return current cursor column */
+    long id;
+    struct QLRECT *win;
+{
+int  err
+    ;
+err = sd_chenq(id,-1,win);
+return err ? (short)err : win->q_x;
+}
+
+
+int hps_err(irorre,msg,qdos_error)
+    int  irorre; /* read reverse (error type is integer) */
+    char *msg;   /* additional message */
+    int  qdos_error; /* if != 0 function aborts */
+{
+static char *error_message[] = {
+    /* 0 */  "" /* NO ERROR, i.e. a dummy */
+    /* 1 */ ,"too many -%s options"
+    /* 2 */ ,"unknown option -%s"
+    /* 3 */ ,"in -Tn n must be 0, 1, 2 or 4"
+    /* 4 */ ,"option %s needs an int argument"
+    /* 5 */ ,"too many filenames"
+    /* 6 */ ,"can't open directory"
+    /* 7 */ ,"error when reading"
+    /* 8 */ ,"%s option AND name not allowed"
+};
+fprintf(stderr,"\nls (%d): ",irorre);
+fprintf(stderr,error_message[irorre],msg);
+fprintf(stderr,"\nls -? for help\n");
+if (qdos_error){
+    sp_ent();
+    exit(qdos_error);
+}
+return 0;
+}
+
+void usage(){
+int msg;
+static char *help_message[] = {
+"\nls  list directories\n\n",
+"usage: ls [-options] [name]\n\n",
+"  -Tn    type(s) of files to list:\n",
+"         n=0  all files\n",
+"         n=1  data files (filetype 0)\n",
+"         n=2  progs (filetype 1)\n",
+"         n=4  directories (filetype -1)\n"
+"  -l     show detailed file infos\n",
+"  -x     columnar output side by side\n",
+"         (ignored with -l)\n",
+"  -e-nam use if name starts with '-'\n",
+"         e.g. -e-unusual_name\n",
+"  -?     show this help text\n",
+"  name   filename may include wildcards\n",
+"  (wildcards see doc's for C68 Compiler)\n",
+"  default ls *, i.e. all files in\n",
+"  current data directory\n",
+"" /* end of message */
+};
+for (msg=0; *help_message[msg] != '\0'; msg++)
+    printf("%s",help_message[msg]);
+sp_ent();
+}
+
+void sp_ent(){ /* press Space or Enter, then continue if stdin is a CON_ */
+
+int  irorre1;
+long id;
+char c;
+
+id = fgetchid(stdout);
+if (own_con){
+    fflush(stdout);
+    if (irorre1=curcol(id,&sowin)){ /* cursor not in column 0 */
+        putchar('\n');
+    }
+    fprintf(stdout,"Press SPACE or ENTER to continue ...");
+    fflush(stdout);
+    for(;;){ /* ever */
+        irorre1 = sd_cure(id,-1);
+        if (irorre1)
+            return;
+        irorre1 = io_fbyte(id,-1,&c);
+        sd_curs(id,-1);
+        if (c == ' ' || c == '\n' || irorre1){
+            putc('\n',stdout);
+            return;
+        }
+    }
+}
+}
+
+
+int is_own_con(){ /* return != 0 if con-channel and not redirected */
+
+int  irorre1;
+long id;
+char c;
+
+id = fgetchid(stdout);
+if(isatty(fileno(stdout)) && !isnoclose(fileno(stdout))) {
+    if (iscon(id,-1)){ /* make absolutely sure that stdout is a CON-channel */
+        return 1;
+    }
+}
+return 0;
+}
+
