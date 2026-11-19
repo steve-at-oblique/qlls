@@ -12,11 +12,48 @@ ls_init:
         move.w 0x110,a2
         jmp (a2)
 ls_table:
-        .data2 1
+        .data2 2
 ls_slot:
         .data2 ls_command-ls_slot
         .data1 2,0x4c,0x53,0
+ls_use_slot:
+        .data2 ls_use-ls_use_slot
+        .data1 6
+        .ascii "LS_USE"
+        .data1 0
         .data2 0,0,0
+; LS_USE takes a string expression containing the full executable filename.
+ls_use:
+        move.l a5,d0
+        sub.l a3,d0
+        cmp.l #8,d0
+        bne ls_bad
+        move.w 0x116,a2
+        jsr (a2)
+        tst.l d0
+        bne ls_use_return
+        moveq #0,d1
+        move.w 0(a6,a1.l),d1
+        addq.l #2,a1
+        move.l a1,d0
+        add.l d1,d0
+        addq.l #1,d0
+        and.l #-2,d0
+        move.l d0,0x58(a6)
+        tst.w d1
+        beq ls_bad
+        cmp.w #255,d1
+        bhi ls_bad
+        lea ls_program(pc),a0
+        move.w d1,(a0)+
+        subq.w #1,d1
+ls_use_copy:
+        move.b 0(a6,a1.l),(a0)+
+        addq.l #1,a1
+        dbra d1,ls_use_copy
+        moveq #0,d0
+ls_use_return:
+        rts
 ls_command:
         move.l a5,d7
         sub.l a3,d7
@@ -245,4 +282,5 @@ ls_bad:
 ls_program:
         .data2 7
         .ascii "snl4_ls"
+        .space 248
         .align 2

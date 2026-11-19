@@ -29,9 +29,12 @@ build/rext/empty.o:
 	printf '        .sect .text\n' > build/rext/empty.s
 	$(QDOS_BINDIR)qdos-as build/rext/empty.s -o $@
 
-bin/ls_rext: build/rext/crt.o build/rext/empty.o
-	mkdir -p bin
+build/rext/linked: build/rext/crt.o build/rext/empty.o
 	cd build/rext && $(QDOS_BINDIR)qdos-ld -L. -L$(QDOS_LIBDIR) -o $(CURDIR)/$@ empty.o
+
+bin/ls_rext: build/rext/linked Makefile
+	mkdir -p bin
+	python3 -c 'from pathlib import Path; data = Path("$<").read_bytes(); assert data[-8:-4] == b"XTcc", "Missing linker trailer"; Path("$@").write_bytes(data[:-8])'
 
 test-launcher: bin/ls_rext
 	python3 tests/test_ls_rext.py

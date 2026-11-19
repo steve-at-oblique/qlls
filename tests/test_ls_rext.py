@@ -20,7 +20,7 @@ A = [UC_M68K_REG_A0, UC_M68K_REG_A1, UC_M68K_REG_A2, UC_M68K_REG_A3,
 class Machine:
     BASE, BASIC, WORK, JOB, STACK, STOP, VECTOR = 0x10000, 0x20000, 0x40000, 0x50000, 0x28000, 0xf000, 0x1200
 
-    def __init__(self, argument=None, string=False, fail=None, relocate=False, count=None, arguments=None, channel=0x30003, child_error=0):
+    def __init__(self, argument=None, string=False, fail=None, relocate=False, count=None, arguments=None, channel=0x30003, child_error=0, executable=None):
         self.cpu = Uc(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN)
         self.cpu.ctl_set_cpu_model(UC_CPU_M68K_M68000)
         self.cpu.mem_map(0, 0x100000)
@@ -33,6 +33,7 @@ class Machine:
         self.arguments = arguments if arguments is not None else ([] if argument is None else [(argument,string)])
         self.child_error = child_error
         self.channel = channel
+        self.executable = executable or b"snl4_ls"
         self.minimum_sp = self.STACK
         self.put(0x110, self.VECTOR, 2)
         self.put(0x116, self.VECTOR + 16, 2)
@@ -60,6 +61,17 @@ class Machine:
             name_offset = 19 + i * 270
             self.put(self.BASIC + 0x800 + (37+i)*8 + 2, name_offset, 2)
             self.cpu.mem_write(self.BASIC + 0x300 + name_offset, bytes([len(arg)]) + arg)
+        if executable is not None:
+            saved_args = self.arguments
+            self.arguments = [(executable, True)]
+            self.cpu.reg_write(A[5], 0x108)
+            self.cpu.emu_start(self.use_entry, self.STOP, count=30000)
+            assert self.reg(D[0]) == 0
+            assert self.reg(UC_M68K_REG_PC) == self.STOP
+            self.arguments = saved_args
+            self.cpu.reg_write(A[7], self.STACK)
+            self.cpu.reg_write(A[3], 0x100)
+            self.cpu.reg_write(A[5], 0x100 + 8 * len(saved_args))
         try:
             self.cpu.emu_start(self.entry, self.STOP, count=30000)
         except Exception:
@@ -89,10 +101,12 @@ class Machine:
         self.minimum_sp = min(self.minimum_sp, self.reg(A[7]))
         if pc == self.VECTOR:
             table = self.reg(A[1])
-            assert self.get(table, 2) == 1
+            assert self.get(table, 2) == 2
             assert bytes(cpu.mem_read(table + 4, 3)) == b'\x02LS'
             delta = self.get(table + 2, 2)
             self.entry_point = table + 2 + (delta if delta < 32768 else delta - 65536)
+            assert bytes(cpu.mem_read(table + 10, 7)) == b'\x06LS_USE'
+            self.use_entry = table + 8 + self.get(table + 8, 2)
             self.return_from_vector()
             return
         if pc == self.VECTOR + 16:
@@ -126,7 +140,7 @@ class Machine:
                 cpu.reg_write(A[0], self.WORK)
             elif (trap, key) == (2, 1):
                 ptr = self.reg(A[0])
-                assert bytes(cpu.mem_read(ptr + 2, self.get(ptr, 2))) == b'snl4_ls'
+                assert bytes(cpu.mem_read(ptr + 2, self.get(ptr, 2))) == self.executable
                 self.opened = True
                 cpu.reg_write(A[0], 0x10001)
             elif (trap, key) == (3, 0x47):
@@ -173,6 +187,12 @@ class Machine:
 
 
 class LauncherTests(unittest.TestCase):
+    def test_configured_executable(self):
+        m = Machine(b'win1_', executable=b'win1_tools_ls', relocate=True)
+        self.assertEqual(m.result, 0)
+        self.assertTrue(m.activated)
+        self.assertEqual(m.command, b'"win1_"')
+
     def test_launch_arguments(self):
         for argument, string in [(None, False), (b'snl4_error_txt', False),
                                  (b'snl4_name with spaces', True), (b'x' * 253, True),

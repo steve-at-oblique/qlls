@@ -7,23 +7,37 @@ sorts the displayed listing without rearranging the directory on disk.
 
 ## Install
 
-Ready-built files are in **bin/**:
+Download the two ready-built files from [bin/](bin/). You can install them on
+WIN1 with Toolkit II's `LRESPR`, or the equivalent command in SMSQ/E.
 
-- **bin/ls**: the executable, packaged with the QDOS header wrapper understood
-  by SNL, like qlvi's Elvis executable.
-- **bin/ls_rext**: the resident SuperBASIC command extension.
-
-Copy both files into the host share served as SNL drive 4, keeping their names.
-Load the command once per boot:
+1. Copy [ls_rext](bin/ls_rext) in binary mode to `win1_ls_rext`. It is raw
+   resident code with no executable wrapper or XTcc trailer.
+2. Transfer [ls](bin/ls) to `win1_ls` as a QDOS executable. The download has
+   an inline QDOS header. Use a transfer tool that interprets the wrapper and
+   sets the native executable type and dataspace on WIN1.
+3. Load the extension, set the executable path, and try a listing.
 
 ```basic
-LRESPR snl4_ls_rext
+LRESPR win1_ls_rext
+LS_USE "win1_ls"
+LS win1_
 ```
 
-You can put that line in your `win1_` BOOT sequence **after SNL is ready**.
-The SNL daemon must be running when the files are loaded. The resident command
-launches `snl4_ls`; if you move the executable elsewhere, change the embedded
-name and its length at the end of `ls_rext.s` and rebuild.
+This setup was tested on a physical QL with both files on WIN1 and the SNL
+daemon stopped.
+
+`LS_USE` takes the full filename of the executable. For example, use
+`LS_USE "win2_tools_ls"` if you installed it there. Put `LRESPR` followed by
+`LS_USE` in your BOOT file to configure it each boot.
+
+If `LRESPR` succeeds but `LS` fails, try
+`EW win1_ls,#1,#1,#1;"win1_"` to check whether QDOS can run the executable
+directly. If that fails too, check the file's executable metadata and transfer
+method. See [QDOS file header formats](https://www.kilgus.net/2021/11/13/a-short-history-of-qdos-file-headers/).
+
+For an SNL installation, copy both files to the SNL4 host share and run
+`LRESPR snl4_ls_rext` once SNL is ready. The built-in executable path is
+`snl4_ls`, so that setup can omit `LS_USE`.
 
 ```basic
 LS win1_

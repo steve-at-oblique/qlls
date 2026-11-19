@@ -1,22 +1,25 @@
 # Ready-built QL files
 
-Copy `ls` and `ls_rext` to the host share served as SNL drive 4. Keep these names:
-the resident LS command launches `snl4_ls`.
-
-Load once per boot, after SNL is ready:
+Copy `ls_rext` in binary mode to `win1_ls_rext`. Transfer `ls` to `win1_ls`
+using a tool that interprets its inline QDOS header and preserves the native
+executable type and dataspace.
 
 ```basic
-LRESPR snl4_ls_rext
+LRESPR win1_ls_rext
+LS_USE "win1_ls"
+LS win1_
 ```
 
-Then run `LS win1_` or `LS snl1_`. The default lists names, byte sizes and
-modification dates. Use `LS win1_,"-s"` for names only. Output goes to #1.
+The extension is raw resident code with no executable wrapper or XTcc trailer.
+Use the full executable filename with `LS_USE`. Reboot before reloading a
+changed extension.
 
-`ls` includes the QDOS wrapper understood by SNL. `ls_rext` is resident code
-loaded with LRESPR, not an EX executable. Reboot before reloading a changed
-resident extension; replacing only ls needs no reboot.
+For SNL4, copy both files to the host share and load `LRESPR snl4_ls_rext`.
+The extension defaults to launching `snl4_ls`.
 
-See ../README.md for all options, source, build and testing instructions.
+See the [main README](../README.md) for transfer details, options and build
+instructions.
+
 The ls program is GPL-1.0-or-later; see ../LICENSE.md and ../COPYING. The
 separate resident launcher retains its BSD-2-Clause notice; see
 ../LICENSES/BSD-2-Clause.txt. Distribute these binaries with the source and
