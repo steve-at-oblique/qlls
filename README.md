@@ -54,7 +54,8 @@ enclose the path in double quotes inside a single-quoted BASIC string, as in
 
 ## Resident BASIC command
 
-Transfer `ls_rext` as a raw binary and transfer `ls` as a QDOS executable.
+Transfer the 966-byte `ls_rext` as a raw binary and transfer `ls` as a QDOS
+executable.
 Load the extension once per boot with Toolkit II or SMSQ/E.
 
 ```basic
@@ -97,6 +98,12 @@ SEXEC FLP1_ls,a,1386,512
 
 To build the raw resident extension, use `OUT FLP1_ls_rext` and
 `INCLUDE FLP1_ls_rext_asm` in the workbench. Load the output with `LRESPR`.
+
+After compiling either binary, copy the updated build into this checkout
+and run `make ls.zip` before committing. The archive includes both binaries
+and the license. Use QL-aware UnZip to restore the executable metadata.
+For Mac or Linux transfers via SNL, use the standalone `ls` with its inline
+QDOS header.
 
 The command-line build was tested in sQLux with the Sinclair JS ROM at
 128K, with and without Toolkit II, and with Minerva plus Toolkit II. It
