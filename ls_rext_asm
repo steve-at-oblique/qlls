@@ -1,0 +1,287 @@
+; Copyright (c) 2026 Steve Jennen
+; SPDX-License-Identifier: BSD-2-Clause
+; Resident LS launcher for Talent/Quanta 2.02, Motorola 68000.
+; Load this raw extension with LRESPR. The listing code lives in ls.
+
+bp_init     equ $110
+sb_gtstr    equ $116
+bv_ntbas    equ $18
+bv_nlbas    equ $20
+bv_rip      equ $58
+jcb_a7      equ -12                 ; relative to job code base
+err_bp      equ -15
+
+; Temporary heap workspace for one launch.
+exec_chan   equ 0
+child_id    equ 4
+child_base  equ 8
+arg_cur     equ 12
+arg_end     equ 16
+cmd_len     equ 20
+cmd_text    equ 22
+path_max    equ 64                  ; capacity of the LS job's path buffer
+cmd_max     equ 255
+cmd_head    equ cmd_text+cmd_max+3  ; space to add quotes and underscore
+work_len    equ cmd_head+64
+stack_extra equ cmd_max+5           ; channel count, length, and padding
+exec_max    equ 255
+
+init               lea     proc_tab(pc),a1
+        movea.w bp_init,a2
+        jmp     (a2)
+proc_tab           dc.w    2
+ls_slot            dc.w    ls_cmd-ls_slot
+        dc.b    2,'LS',0
+use_slot           dc.w    ls_use-use_slot
+        dc.b    6,'LS_USE',0
+        dc.w    0,0,0
+
+; Set the executable's full native name from a BASIC string expression.
+ls_use             move.l  a5,d0
+        sub.l   a3,d0
+        cmpi.l  #8,d0
+        bne     bad_param
+        bsr     get_str
+        tst.l   d0
+        bne.s   use_done
+        tst.w   d6
+        beq     bad_param
+        cmpi.w  #exec_max,d6
+        bhi     bad_param
+        lea     exec_name(pc),a0
+        move.w  d6,(a0)+
+        subq.w  #1,d6
+use_copy           move.b  0(a6,a1.l),(a0)+
+        addq.l  #1,a1
+        dbra    d6,use_copy
+        moveq   #0,d0
+use_done           rts
+
+; Fetch a single BASIC string and pop the result from the arithmetic stack.
+; Return relative text pointer A1 and length D6. BASIC may relocate A6.
+get_str            movea.w sb_gtstr,a2
+        jsr     (a2)
+        tst.l   d0
+        bne.s   str_done
+        moveq   #0,d6
+        move.w  0(a6,a1.l),d6
+        addq.l  #2,a1
+        move.l  a1,d0
+        add.l   d6,d0
+        addq.l  #1,d0
+        andi.l  #$fffffffe,d0
+        move.l  d0,bv_rip(a6)
+        moveq   #0,d0
+str_done           rts
+
+ls_cmd             move.l  a5,d7
+        sub.l   a3,d7
+        cmpi.l  #16*8,d7
+        bhi     bad_param
+        move.l  #work_len,d1
+        moveq   #-1,d2
+        moveq   #$18,d0             ; MT.ALCHP
+        move.l  a3,-(a7)
+        trap    #1
+        movea.l (a7)+,a3
+        tst.l   d0
+        bne     ls_done
+        movea.l a0,a4
+        moveq   #-1,d0
+        move.l  d0,exec_chan(a4)
+        move.l  d0,child_id(a4)
+        clr.w   cmd_len(a4)
+        move.l  a3,arg_cur(a4)
+        move.l  a5,arg_end(a4)
+
+next_arg           movea.l arg_cur(a4),a3
+        cmpa.l  arg_end(a4),a3
+        beq     load_job
+        lea     8(a3),a5
+
+; A string expression is fetched by the BASIC vector. An unassigned
+; bare name is resolved from the name table and name list.
+        move.b  1(a6,a3.l),d0
+        andi.b  #$8f,d0            ; ignore the separator after this argument
+        cmpi.b  #1,d0
+        bne.s   bare_name
+        move.b  0(a6,a3.l),d0
+        andi.b  #15,d0
+        cmpi.b  #1,d0
+        beq.s   path_str
+        tst.l   4(a6,a3.l)
+        bmi.s   bare_name
+path_str           bsr     get_str
+        tst.l   d0
+        bne     cleanup
+        bra.s   path_arg
+bare_name          moveq   #0,d0
+        move.w  2(a6,a3.l),d0
+        bmi     launch_bp
+        lsl.l   #3,d0
+        add.l   bv_ntbas(a6),d0
+        movea.l d0,a1
+        moveq   #0,d0
+        move.w  2(a6,a1.l),d0
+        add.l   bv_nlbas(a6),d0
+        movea.l d0,a1
+        moveq   #0,d6
+        move.b  0(a6,a1.l),d6
+        addq.l  #1,a1
+
+path_arg           tst.w   d6
+        beq     launch_bp
+        moveq   #0,d2              ; unquoted option text
+        cmpi.b  #'-',0(a6,a1.l)
+        beq.s   arg_room
+        cmpi.w  #path_max,d6
+        bhi     launch_bp
+        moveq   #34,d2             ; quote a directory that may contain spaces
+arg_room           moveq   #0,d5
+        move.w  cmd_len(a4),d5
+        lea     cmd_text(a4),a2
+        adda.w  d5,a2
+        tst.w   d5
+        beq.s   arg_fit
+        addq.w  #1,d5
+arg_fit            add.l   d6,d5
+        cmpi.l  #cmd_max,d5
+        bhi     launch_bp
+        tst.w   cmd_len(a4)
+        beq.s   arg_quote
+        move.b  #' ',(a2)+
+arg_quote          tst.b   d2
+        beq.s   arg_copy
+        move.b  d2,(a2)+
+arg_copy
+        move.w  d6,d1
+        subq.w  #1,d1
+path_copy          move.b  0(a6,a1.l),d0
+        cmpi.b  #34,d0
+        beq     launch_bp
+        cmpi.b  #32,d0
+        bcs     launch_bp
+        move.b  d0,(a2)+
+        addq.l  #1,a1
+        dbra    d1,path_copy
+        tst.b   d2
+        beq.s   arg_save
+        cmpi.w  #4,d6               ; normalize a bare device such as WIN1
+        bne.s   quote_end
+        cmpi.b  #'1',d0
+        bcs.s   quote_end
+        cmpi.b  #'8',d0
+        bhi.s   quote_end
+        move.b  #'_',(a2)+
+        addq.w  #1,d5
+quote_end          move.b  d2,(a2)
+        addq.w  #2,d5
+arg_save           cmpi.w  #cmd_max,d5
+        bhi     launch_bp
+        move.w  d5,cmd_len(a4)
+        addq.l  #8,arg_cur(a4)
+        bra     next_arg
+
+load_job           lea     exec_name(pc),a0
+        moveq   #-1,d1
+        moveq   #1,d3               ; shared read
+        moveq   #1,d0               ; IO.OPEN
+        trap    #2
+        tst.l   d0
+        bne     cleanup
+        move.l  a0,exec_chan(a4)
+        lea     cmd_head(a4),a1
+        moveq   #64,d2
+        moveq   #-1,d3
+        moveq   #$47,d0             ; IOF.RHDR
+        trap    #3
+        tst.l   d0
+        bne     cleanup
+        cmpi.b  #1,cmd_head+5(a4)
+        bne     launch_bp
+        move.l  cmd_head(a4),d2
+        cmpi.l  #12,d2
+        bcs     launch_bp
+        move.l  cmd_head+6(a4),d3
+        ble     launch_bp
+        addi.l  #stack_extra,d3
+        bvs     launch_bp
+        moveq   #0,d1               ; job owned by main BASIC
+        suba.l  a1,a1
+        moveq   #1,d0               ; MT.CJOB
+        trap    #1
+        tst.l   d0
+        bne     cleanup
+        move.l  d1,child_id(a4)
+        move.l  a0,child_base(a4)
+        movea.l a0,a1
+        movea.l exec_chan(a4),a0
+        move.l  cmd_head(a4),d2
+        moveq   #-1,d3
+        moveq   #$48,d0             ; IOF.LOAD
+        trap    #3
+        tst.l   d0
+        bne.s   cleanup
+
+; Prepare the child's standard EXEC stack, with zero passed channel IDs.
+        movea.l child_base(a4),a0
+        movea.l jcb_a7(a0),a2
+        moveq   #0,d1
+        move.w  cmd_len(a4),d1
+        move.l  d1,d0
+        addq.l  #5,d0
+        andi.w  #$fffe,d0
+        suba.l  d0,a2
+        move.l  a2,jcb_a7(a0)
+        clr.w   (a2)+
+        move.w  d1,(a2)+
+        beq.s   close_exec
+        lea     cmd_text(a4),a1
+        subq.w  #1,d1
+stack_copy         move.b  (a1)+,(a2)+
+        dbra    d1,stack_copy
+close_exec         movea.l exec_chan(a4),a0
+        moveq   #2,d0               ; IO.CLOSE
+        trap    #2
+        tst.l   d0
+        bne.s   cleanup
+        moveq   #-1,d0
+        move.l  d0,exec_chan(a4)
+
+        move.l  child_id(a4),d1
+        moveq   #32,d2
+        moveq   #-1,d3
+        moveq   #10,d0              ; MT.ACTIV and wait for completion
+        trap    #1
+        tst.l   d0
+        bne.s   cleanup
+        moveq   #-1,d1
+        move.l  d1,child_id(a4)
+        bra.s   cleanup
+launch_bp          moveq   #err_bp,d0
+cleanup            move.l  d0,d7
+        move.l  exec_chan(a4),d0
+        tst.w   d0                  ; ignore the channel tag in the high word
+        bmi.s   clean_job
+        movea.l d0,a0
+        moveq   #2,d0
+        trap    #2
+clean_job          move.l  child_id(a4),d1
+        tst.w   d1
+        bmi.s   clean_mem
+        moveq   #-1,d3
+        moveq   #5,d0               ; MT.FRJOB
+        trap    #1
+clean_mem          movea.l a4,a0
+        moveq   #$19,d0             ; MT.RECHP
+        trap    #1
+        move.l  d7,d0
+ls_done            rts
+bad_param          moveq   #err_bp,d0
+        rts
+
+exec_name          dc.w    7
+        dc.b    'win1_ls'
+        ds.b    exec_max-7
+        dc.b    0                   ; keep resident block word-aligned
+        end
