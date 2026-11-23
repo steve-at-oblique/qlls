@@ -1,3 +1,5 @@
+; Copyright (c) 2026 Steve Jennen
+; SPDX-License-Identifier: BSD-2-Clause
 ; Talent/Quanta 2.02, Motorola 68000
 ; Native QDOS job. SEXEC data space: 512 bytes.
 
