@@ -35,7 +35,7 @@ max_name    equ 36
 line_len    equ 66                  ; 8+1+16+1+36+3+1
 
 ; Stack locals relative to the line buffer in A3. QDOS heap traps can clobber A3.
-local_len   equ 22
+local_len   equ 24
 block_head  equ 0-hdr_len-local_len
 block_next  equ block_head+4
 block_end   equ block_head+8
@@ -43,6 +43,7 @@ entry_head  equ block_head+12
 entry_tail  equ block_head+16
 sort_field  equ block_head+20
 sort_flip   equ block_head+21
+one_col     equ block_head+22
 work_area   equ block_head-line_len
 
 ; Packed entries are word-aligned. Each block starts with a link to
@@ -96,6 +97,7 @@ channel_one        move.l  bv_chbas(a1),d0
         lea     local_len(a7),a6
         lea     hdr_len(a6),a3
         clr.w   sort_field(a3)     ; name ascending
+        clr.w   one_col(a3)
         clr.w   (a3)               ; no explicit path yet
         bsr     parse_args
         tst.l   d0
@@ -246,6 +248,8 @@ arg_next           cmpa.l  a2,a1
         bsr   is_space
         beq   arg_error
 arg_option         move.b  (a1)+,d0
+        cmpi.b  #'1',d0
+        beq.s   arg_one
         cmpi.b  #'r',d0
         beq.s   arg_flip
         moveq   #sort_name,d1
@@ -258,6 +262,8 @@ arg_option         move.b  (a1)+,d0
         cmpi.b  #'t',d0
         bne   arg_error
 arg_field          move.b  d1,sort_field(a3)
+        bra.s   arg_more
+arg_one            move.b  #1,one_col(a3)
         bra.s   arg_more
 arg_flip           move.b  #1,sort_flip(a3)
 arg_more           cmpa.l  a2,a1
@@ -503,6 +509,8 @@ fold_done          rts
 ; A6 = packed entry, A3 = line buffer, D6.W = filename length.
 ; Returns the number of bytes to send in D2.W.
 format_line        movea.l a3,a1
+        tst.b   one_col(a3)
+        bne.s   name_only
         lea     powers(pc),a2
         move.l  ent_size(a6),d0
         moveq   #0,d7
@@ -536,10 +544,12 @@ size_done          move.b  #' ',(a1)+
         move.l  ent_date(a6),d0
         bsr     format_date
         move.b  #' ',(a1)+
-        lea     ent_name(a6),a2
+name_only       lea  ent_name(a6),a2
         subq.w  #1,d6
 copy_name          move.b  (a2)+,(a1)+
         dbra    d6,copy_name
+        tst.b   one_col(a3)
+        bne.s   end_line
         cmpi.b  #-1,ent_type(a6)
         bne.s   end_line
         move.b  #' ',(a1)+
