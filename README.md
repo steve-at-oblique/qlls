@@ -1,13 +1,14 @@
 # LS for Sinclair QL
 
-LS is a native 68000 directory listing job for QDOS. By default, it
+LS is a native 68000 directory listing job for QDOS and SMSQ/E. By default, it
 sorts filenames in ascending, case-insensitive order and prints each name with
 its original capitalization. The size, date, and filename fields are separated
 by one space. Sizes are right-aligned in a field of at least six columns.
 Sizes over 999999 bytes are divided by 1024 and rounded down, with the
 trailing `K` counted as part of the field. Directories show zero bytes and a trailing ` ->` when the
-driver reports a directory entry. A zero timestamp is shown as a centered
-`-` in the 16-character date field.
+driver reports a directory entry. Executable programs (QDOS file type 1) show a
+trailing `*`. A zero timestamp is shown as a centered `-` in the 16-character
+date field.
 
 LS stores directory entries in packed, job-owned heap blocks. If QDOS runs
 out of memory while collecting entries, LS closes the directory, releases
@@ -23,11 +24,11 @@ Copy `ls` from the project root in binary mode to your SNL drive. For example:
 EXEC_W SNL1_ls
 ```
 
-The 1416-byte transfer file contains a 30-byte header and the 1386-byte executable.
+The 1636-byte transfer file contains a 30-byte header and the 1606-byte executable.
 The header specifies QDOS file type 1 and 512 bytes of data space.
 
 Stock QDOS lists `MDV1_`. With Toolkit II or SMSQ/E, LS reads the current
-`DATA_USE` instead. LS writes a newline and then the listing to the main
+`DATA_USE` instead. By default, LS writes a newline and then the listing to the main
 BASIC job’s channel `#1`, the default output channel for `DIR`.
 
 ## Command-line options
@@ -38,19 +39,26 @@ With Toolkit II or SMSQ/E, pass a command string to `EW` or `EXEC_W`.
 EW SNL4_ls;"-nr snl1_"
 EW SNL4_ls;"-sr"
 EW SNL4_ls;"-tr win1_docs_"
+EW SNL4_ls;"-1 win1_"
+EW SNL4_ls;"snl1_a"
+EW SNL4_ls;"#3,snl1_"
+EW SNL4_ls,#3;"-1 snl1_"
 ```
 
+- `-1` prints bare filenames only, one per line, without sizes, dates, or type indicators.
 - `-n` sorts by name, A–Z.
 - `-s` sorts by size, smallest first. Directories count as zero bytes.
 - `-t` sorts by modification date, newest first. An absent date sorts oldest.
 - `-r` reverses the selected field’s default direction.
+- `#n` redirects output to an open SuperBASIC channel `#n` (with an optional comma or space before the path). Passing an open channel directly to `EW` or `EXEC_W` (such as `EW SNL4_ls,#3;"snl1_"`) is also supported.
 
 Combine options or pass them separately. The last field option selects the
 sort field. Equal keys preserve directory order. Supply one device or
 directory to override the default. Keep the native device and directory
-prefix, including its trailing underscore. For a path containing spaces,
-enclose the path in double quotes inside a single-quoted BASIC string, as in
-`EW SNL4_ls;'-t "WIN1_My Files_"'`.
+prefix, including its trailing underscore, or append a filename prefix
+(such as `snl1_a`) to filter matching entries via the QDOS directory driver.
+For a path containing spaces, enclose the path in double quotes inside a
+single-quoted BASIC string, as in `EW SNL4_ls;'-t "WIN1_My Files_"'`.
 
 ## Resident BASIC command
 
@@ -87,13 +95,13 @@ OUT FLP1_ls_bin
 INCLUDE FLP1_ls_asm
 ```
 
-The source ends the assembly. The current build occupies 1386 bytes starting
+The source ends the assembly. The current build occupies 1606 bytes starting
 at address zero. From SuperBASIC, save it with the required 512-byte data space:
 
 ```basic
-a=RESPR(1386)
+a=RESPR(1606)
 LBYTES FLP1_ls_bin,a
-SEXEC FLP1_ls,a,1386,512
+SEXEC FLP1_ls,a,1606,512
 ```
 
 To build the raw resident extension, use `OUT FLP1_ls_rext` and
@@ -107,4 +115,4 @@ QDOS header.
 
 The command-line build was tested in sQLux with the Sinclair JS ROM at
 128K, with and without Toolkit II, and with Minerva plus Toolkit II. It
-also passed on a physical Sinclair QL and on QIMSI Gold.
+also passed on a physical Sinclair QL, on QIMSI Gold, and on SMSQ/E.
