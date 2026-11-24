@@ -551,10 +551,14 @@ copy_name          move.b  (a2)+,(a1)+
         tst.b   one_col(a3)
         bne.s   end_line
         cmpi.b  #-1,ent_type(a6)
-        bne.s   end_line
+        bne.s   check_exec
         move.b  #' ',(a1)+
         move.b  #'-',(a1)+
         move.b  #'>',(a1)+
+        bra.s   end_line
+check_exec         cmpi.b  #1,ent_type(a6)
+        bne.s   end_line
+        move.b  #'*',(a1)+
 end_line           move.b  #10,(a1)+
         move.l  a1,d2
         sub.l   a3,d2
