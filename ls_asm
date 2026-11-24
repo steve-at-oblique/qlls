@@ -223,18 +223,24 @@ open_channel       moveq   #-1,d1
 ; The explicit path is stored as a QDOS string in the line buffer.
 parse_args         moveq   #0,d0
         move.w  (a1)+,d0
-        lsl.l   #2,d0
+        beq.s   pa_string
+        movea.l (a1),a4            ; use first passed channel (#3) as default output!
+pa_string         lsl.l   #2,d0
         adda.l  d0,a1
         moveq   #0,d0
         move.w  (a1)+,d0
         lea     0(a1,d0.l),a2
 arg_next           cmpa.l  a2,a1
-        beq   args_done
+        beq     args_done
         move.b  (a1)+,d0
-        bsr   arg_space
+        bsr     arg_space
         beq.s   arg_next
+        cmpi.b  #'#',d0
+        beq.s   arg_channel
         cmpi.b  #'-',d0
-        bne.s   arg_path
+        bne     arg_path
+        cmpi.b  #'-',d0
+        bne     arg_path
         cmpa.l  a2,a1
         beq   arg_error
         bsr   is_space
@@ -259,6 +265,70 @@ arg_more           cmpa.l  a2,a1
         bsr   is_space
         bne.s   arg_option
         bra.s   arg_next
+
+arg_channel        moveq   #0,d1              ; parsed channel number
+        moveq   #0,d2              ; digit count flag
+chan_digit         cmpa.l  a2,a1
+        beq.s   chan_done
+        move.b  (a1),d0
+        subi.b  #'0',d0
+        bcs.s   chan_sep
+        cmpi.b  #9,d0
+        bhi.s   chan_sep
+        addq.l  #1,a1
+        moveq   #1,d2
+        cmpi.w  #255,d1            ; prevent 16-bit overflow
+        bhi     arg_error
+        mulu.w  #10,d1
+        ext.w   d0
+        add.w   d0,d1
+        bra.s   chan_digit
+
+chan_sep           cmpi.b  #',',(a1)
+        bne.s   chan_check_sp
+        addq.l  #1,a1              ; consume optional comma (#3,snl1_)
+        bra.s   chan_done
+chan_check_sp      bsr     is_space
+        bne     arg_error          ; reject junk like #3foo
+
+chan_done          tst.w   d2
+        beq     arg_error          ; reject bare '#' with no digits
+        bsr     get_channel        ; sets A4 or returns ql_err_ch in D0
+        tst.l   d0
+        bne.s   chan_fail
+        bra     arg_next
+chan_fail          rts
+
+; Look up SuperBASIC channel #D1.W in job 0's channel table.
+; Expects A5 = sysvars. Returns A4 = QDOS channel ID, D0 = 0 (or ql_err_ch).
+get_channel        movem.l a1,-(a7)
+        cmpi.l  #smsq_id,(a5)
+        beq.s   gc_smsq
+        movea.l sv_basic(a5),a1
+        lea     job_header(a1),a1
+        bra.s   gc_lookup
+
+gc_smsq            movea.l sv_jobs(a5),a1
+        movea.l (a1),a1
+        lea     sb_vars(a1),a1
+
+gc_lookup          mulu.w  #bv_chlen,d1       ; D1 = n * entry size ($28)
+        move.l  bv_chbas(a1),d0
+        add.l   d1,d0
+        cmp.l   bv_chtop(a1),d0
+        bcc.s   gc_bad
+        adda.l  d0,a1
+        move.l  (a1),d0
+        tst.w   d0                 ; closed entries have bit 15 set ($FFFF)
+        bmi.s   gc_bad
+        movea.l d0,a4
+        moveq   #0,d0
+        movem.l (a7)+,a1
+        rts
+
+gc_bad             moveq   #ql_err_ch,d0
+        movem.l (a7)+,a1
+        rts
 
 arg_path           tst.w   (a3)
         bne.s   arg_error          ; only one directory operand
