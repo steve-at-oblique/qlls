@@ -35,7 +35,7 @@ max_name    equ 36
 line_len    equ 66                  ; 8+1+16+1+36+3+1
 
 ; Stack locals relative to the line buffer in A3. QDOS heap traps can clobber A3.
-local_len   equ 24
+local_len   equ 64
 block_head  equ 0-hdr_len-local_len
 block_next  equ block_head+4
 block_end   equ block_head+8
@@ -44,6 +44,8 @@ entry_tail  equ block_head+16
 sort_field  equ block_head+20
 sort_flip   equ block_head+21
 one_col     equ block_head+22
+prefix_len  equ block_head+24       ; length of filename prefix filter (0 = none)
+prefix_buf  equ block_head+26       ; up to 36 prefix characters
 work_area   equ block_head-line_len
 
 ; Packed entries are word-aligned. Each block starts with a link to
@@ -98,6 +100,7 @@ channel_one        move.l  bv_chbas(a1),d0
         lea     hdr_len(a6),a3
         clr.w   sort_field(a3)     ; name ascending
         clr.w   one_col(a3)
+        clr.w   prefix_len(a3)     ; no filename prefix filter yet  ; <--
         clr.w   (a3)               ; no explicit path yet
         bsr     parse_args
         tst.l   d0
@@ -131,8 +134,34 @@ get_default        movea.l a5,a0
 open_directory     moveq   #4,d3
         bsr     open_channel
         tst.l   d0
+        bne.s   try_prefix         ; if IO.OPEN failed (e.g. Level-2), split prefix
+        movea.l a0,a5              ; A5 = open directory channel ID
+        ; Check if A3 had a trailing filename after '_' on a Level-1 driver.
+        ; Call IOF.XINF ($4F): on Level-1 QDOS it returns ERR.BP; on Level-2
+        ; it fills 0..37(A6) with the actual opened directory name.
+        lea     (a6),a1            ; 64-byte scratch buffer
+        moveq   #-1,d3
+        moveq   #$4f,d0            ; IOF.XINF
+        trap    #3
+        tst.l   d0
+        bne.s   extract_prefix     ; Level-1 driver -> extract trailing prefix
+        move.w  (a6),d0            ; actual opened directory name length
+        cmp.w   (a3),d0
+        bcc.s   dir_ready          ; opened full path as a real subdirectory
+extract_prefix     bsr.s   split_prefix
+        bra.s   dir_ready
+
+try_prefix         bsr.s   split_prefix       ; split dir + prefix and retry IO.OPEN
+        tst.w   prefix_len(a3)
+        beq     exit_job           ; no prefix to split -> report original error
+        movea.l a3,a0
+        moveq   #4,d3
+        bsr     open_channel
+        tst.l   d0
         bne     exit_job
         movea.l a0,a5
+dir_ready
+
 
         clr.l   block_head(a3)
         clr.l   block_next(a3)
@@ -164,6 +193,9 @@ check_record       cmpi.w  #hdr_len,d1
         bhi.s   bad_record
         cmpi.l  #hdr_len,(a6)
         bcs.s   bad_record
+
+        bsr.s   match_prefix       ; skip entries not matching prefix_buf
+        bne.s   next_entry
 
         bsr     collect
         tst.l   d0
@@ -219,6 +251,75 @@ remove_job         moveq   #-1,d1
 open_channel       moveq   #-1,d1
         moveq   #ql_io_open,d0
         trap    #2
+        rts
+; Split trailing filename prefix after the last '_' in (A3) into prefix_buf(a3),
+; truncating (A3) to the directory prefix (e.g. "snl6_q" -> "snl6_" + "q").
+; If (A3) has no '_' and DATA_USE is set, copy (A3) to prefix_buf and load DATA_USE.
+split_prefix       move.w  (a3),d1
+        beq.s   sp_done
+        lea     2(a3,d1.w),a0      ; scan backwards from end of path
+        move.w  d1,d0
+        subq.w  #1,d0
+sp_scan            cmpi.b  #'_',-(a0)
+        beq.s   sp_found_under
+        dbra    d0,sp_scan
+        ; No '_' in path: treat entire path as prefix if DATA_USE is available.
+        cmpi.w  #max_name,d1
+        bhi.s   sp_done
+        move.l  sv_datad(a5),d0
+        beq.s   sp_done
+        movea.l d0,a1
+        move.w  (a1),d2
+        beq.s   sp_done
+        move.w  d1,prefix_len(a3)
+        lea     2(a3),a0
+        lea     prefix_buf(a3),a2
+        subq.w  #1,d1
+sp_copy_bare       move.b  (a0)+,(a2)+
+        dbra    d1,sp_copy_bare
+        lea     (a3),a2            ; copy DATA_USE into (A3)
+        move.w  d2,(a2)+
+        addq.l  #2,a1
+        subq.w  #1,d2
+sp_copy_dd         move.b  (a1)+,(a2)+
+        dbra    d2,sp_copy_dd
+sp_done            rts
+
+sp_found_under     addq.w  #1,d0              ; D0 = length including trailing '_'
+        move.w  d1,d2
+        sub.w   d0,d2              ; D2 = trailing prefix length
+        beq.s   sp_done            ; path already ended with '_'
+        cmpi.w  #max_name,d2
+        bhi.s   sp_done
+        move.w  d0,(a3)            ; truncate directory string at '_'
+        move.w  d2,prefix_len(a3)
+        addq.l  #1,a0              ; first char after '_'
+        lea     prefix_buf(a3),a2
+        subq.w  #1,d2
+sp_copy_pfx        move.b  (a0)+,(a2)+
+        dbra    d2,sp_copy_pfx
+        rts
+
+; Compare prefix_buf(a3) against hdr_name(a6), case-insensitively.
+; Returns Z=1 (BEQ) if matched (or prefix_len == 0), Z=0 (BNE) if mismatch.
+match_prefix       move.w  prefix_len(a3),d2
+        beq.s   mp_match
+        cmp.w   hdr_nlen(a6),d2
+        bhi.s   mp_nomatch
+        lea     prefix_buf(a3),a0
+        lea     hdr_name(a6),a2
+        subq.w  #1,d2
+mp_loop            move.b  (a0)+,d0
+        bsr     fold_letter
+        move.b  d0,d1
+        move.b  (a2)+,d0
+        bsr     fold_letter
+        cmp.b   d0,d1
+        bne.s   mp_nomatch
+        dbra    d2,mp_loop
+mp_match           moveq   #0,d0
+        rts
+mp_nomatch         moveq   #1,d0
         rts
 
 ; EXEC passes a word count, that many long channel IDs, then a QDOS string.
