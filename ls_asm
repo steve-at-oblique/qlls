@@ -134,26 +134,29 @@ get_default        movea.l a5,a0
 open_directory     moveq   #4,d3
         bsr     open_channel
         tst.l   d0
-        bne.s   try_prefix         ; if IO.OPEN failed (e.g. Level-2), split prefix
+        bne.s   try_prefix         ; Level-2 driver rejected non-dir -> split prefix
         movea.l a0,a5              ; A5 = open directory channel ID
-        ; Check if A3 had a trailing filename after '_' on a Level-1 driver.
-        ; Call IOF.XINF ($4F): on Level-1 QDOS it returns ERR.BP; on Level-2
-        ; it fills 0..37(A6) with the actual opened directory name.
+        move.w  (a3),d0
+        beq.s   dir_ready
+        cmpi.b  #'_',1(a3,d0.w)    ; did path already end with '_'?
+        beq.s   dir_ready          ; yes -> no trailing prefix
+        ; Query actual opened directory name via IOF.XINF ($4F).
+        ; Buffer layout: $00..$13 medium info, $14(A6) = QDOS string of opened dir.
         lea     (a6),a1            ; 64-byte scratch buffer
         moveq   #-1,d3
         moveq   #$4f,d0            ; IOF.XINF
         trap    #3
         tst.l   d0
-        bne.s   extract_prefix     ; Level-1 driver -> extract trailing prefix
-        move.w  (a6),d0            ; actual opened directory name length
-        cmp.w   (a3),d0
-        bcc.s   dir_ready          ; opened full path as a real subdirectory
-extract_prefix     bsr.s   split_prefix
+        bne.s   extract_prefix     ; Level-1 driver (no IOF.XINF) -> split prefix
+        move.w  $14(a6),d0         ; actual opened directory name length
+        cmp.w   (a3),d0            ; did driver open a shorter parent dir (e.g. win1_)?
+        bcc.s   dir_ready          ; no -> opened full path as a real subdirectory!
+extract_prefix     bsr     split_prefix
         bra.s   dir_ready
 
-try_prefix         bsr.s   split_prefix       ; split dir + prefix and retry IO.OPEN
+try_prefix         bsr     split_prefix
         tst.w   prefix_len(a3)
-        beq     exit_job           ; no prefix to split -> report original error
+        beq     exit_job
         movea.l a3,a0
         moveq   #4,d3
         bsr     open_channel
@@ -194,7 +197,7 @@ check_record       cmpi.w  #hdr_len,d1
         cmpi.l  #hdr_len,(a6)
         bcs.s   bad_record
 
-        bsr.s   match_prefix       ; skip entries not matching prefix_buf
+        bsr     match_prefix       ; skip entries not matching prefix_buf
         bne.s   next_entry
 
         bsr     collect
@@ -281,8 +284,8 @@ sp_copy_bare       move.b  (a0)+,(a2)+
         move.w  d2,(a2)+
         addq.l  #2,a1
         subq.w  #1,d2
-sp_copy_dd         move.b  (a1)+,(a2)+
-        dbra    d2,sp_copy_dd
+spr_copy_dd         move.b  (a1)+,(a2)+
+        dbra    d2,spr_copy_dd
 sp_done            rts
 
 sp_found_under     addq.w  #1,d0              ; D0 = length including trailing '_'
@@ -296,8 +299,8 @@ sp_found_under     addq.w  #1,d0              ; D0 = length including trailing '
         addq.l  #1,a0              ; first char after '_'
         lea     prefix_buf(a3),a2
         subq.w  #1,d2
-sp_copy_pfx        move.b  (a0)+,(a2)+
-        dbra    d2,sp_copy_pfx
+spq_copy_pfx        move.b  (a0)+,(a2)+
+        dbra    d2,spq_copy_pfx
         rts
 
 ; Compare prefix_buf(a3) against hdr_name(a6), case-insensitively.
@@ -340,8 +343,6 @@ arg_next           cmpa.l  a2,a1
         beq.s   arg_next
         cmpi.b  #'#',d0
         beq.s   arg_channel
-        cmpi.b  #'-',d0
-        bne     arg_path
         cmpi.b  #'-',d0
         bne     arg_path
         cmpa.l  a2,a1
