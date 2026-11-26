@@ -42,7 +42,7 @@ def package():
         ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0, 0),
     )
     with TemporaryDirectory(dir=ROOT) as temporary:
-        output = Path(temporary) / "ls.zip"
+        output = Path(temporary) / "ls_zip"
         with ZipFile(output, "w") as archive:
             for name, payload, file_type, dataspace in members:
                 entry = ZipInfo(name)
@@ -51,7 +51,7 @@ def package():
                 entry.compress_type = ZIP_DEFLATED
                 entry.extra = qdos_extra(name, len(payload), file_type, dataspace)
                 archive.writestr(entry, payload)
-        output.replace(ROOT / "ls.zip")
+        output.replace(ROOT / output.name)
 
 
 if __name__ == "__main__":

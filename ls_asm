@@ -46,6 +46,7 @@ sort_flip   equ block_head+21
 one_col     equ block_head+22
 prefix_len  equ block_head+24       ; length of filename prefix filter (0 = none)
 prefix_buf  equ block_head+26       ; up to 36 prefix characters
+dir_len     equ block_head+62       ; parent prefix length, excluding device
 work_area   equ block_head-line_len
 
 ; Packed entries are word-aligned. Each block starts with a link to
@@ -69,43 +70,31 @@ start              bra     main
         dc.b    'LS'
 
 main
-        ; Find channel #1 in job zero's SuperBASIC channel table.
         moveq   #ql_mt_inf,d0
         trap    #1
         movea.l a0,a5
-        cmpi.l  #smsq_id,(a0)
-        beq.s   sms_basic
-        movea.l sv_basic(a0),a1
-        lea     job_header(a1),a1
-        bra.s   channel_one
-
-; SMSQ/E uses sv_basic for the slave-block boundary. Get SBASIC's
-; variables from job zero's control block in the system job table.
-sms_basic          movea.l sv_jobs(a0),a1
-        movea.l (a1),a1
-        lea     sb_vars(a1),a1
-channel_one        move.l  bv_chbas(a1),d0
-        addi.l  #bv_chlen,d0
-        cmp.l   bv_chtop(a1),d0
-        bcc.s   bad_channel
-        adda.l  d0,a1
-        move.l  (a1),d0
-        tst.w   d0                 ; channel number is in the low word
-        bmi.s   bad_channel
-        movea.l d0,a4
-
+        movea.w #-1,a4              ; use BASIC #1 only if no redirect is supplied
         movea.l a7,a1              ; original EXEC stack
         lea     work_area(a7),a7
         lea     local_len(a7),a6
         lea     hdr_len(a6),a3
         clr.w   sort_field(a3)     ; name ascending
         clr.w   one_col(a3)
-        clr.w   prefix_len(a3)     ; no filename prefix filter yet  ; <--
+        clr.w   prefix_len(a3)
+        clr.w   dir_len(a3)
         clr.w   (a3)               ; no explicit path yet
         bsr     parse_args
         tst.l   d0
         bne     exit_job
 
+        move.l  a4,d0
+        tst.w   d0
+        bpl.s   send_newline
+        moveq   #1,d1
+        bsr     get_channel
+        tst.l   d0
+        bne     exit_job
+send_newline
         movea.l a4,a0
         moveq   #10,d1
         moveq   #-1,d3
@@ -113,58 +102,14 @@ channel_one        move.l  bv_chbas(a1),d0
         trap    #3
         tst.l   d0
         bne     exit_job
-        movea.l a3,a0
-        tst.w   (a0)
-        bne.s   open_directory
-        bra.s   get_default
-
-bad_channel        moveq   #ql_err_ch,d0
-        bra     exit_job
-
-; Toolkit II exposes DATA_USE through a system variable.
-; On bare QDOS the unset pointer selects the first microdrive.
-get_default        movea.l a5,a0
-        move.l  sv_datad(a0),d0
-        lea     stock_default(pc),a0
-        beq.s   open_directory
-        movea.l d0,a0
-        tst.w   (a0)
-        bne.s   open_directory
-        lea     stock_default(pc),a0
-open_directory     moveq   #4,d3
-        bsr     open_channel
+        bsr     select_path
         tst.l   d0
-        bne.s   try_prefix         ; Level-2 driver rejected non-dir -> split prefix
-        movea.l a0,a5              ; A5 = open directory channel ID
-        move.w  (a3),d0
-        beq.s   dir_ready
-        cmpi.b  #'_',1(a3,d0.w)    ; did path already end with '_'?
-        beq.s   dir_ready          ; yes -> no trailing prefix
-        ; Query actual opened directory name via IOF.XINF ($4F).
-        ; Buffer layout: $00..$13 medium info, $14(A6) = QDOS string of opened dir.
-        lea     (a6),a1            ; 64-byte scratch buffer
-        moveq   #-1,d3
-        moveq   #$4f,d0            ; IOF.XINF
-        trap    #3
-        tst.l   d0
-        bne.s   extract_prefix     ; Level-1 driver (no IOF.XINF) -> split prefix
-        move.w  $14(a6),d0         ; actual opened directory name length
-        cmp.w   (a3),d0            ; did driver open a shorter parent dir (e.g. win1_)?
-        bcc.s   dir_ready          ; no -> opened full path as a real subdirectory!
-extract_prefix     bsr     split_prefix
-        bra.s   dir_ready
-
-try_prefix         bsr     split_prefix
-        tst.w   prefix_len(a3)
-        beq     exit_job
-        movea.l a3,a0
+        bne     exit_job
         moveq   #4,d3
         bsr     open_channel
         tst.l   d0
         bne     exit_job
         movea.l a0,a5
-dir_ready
-
 
         clr.l   block_head(a3)
         clr.l   block_next(a3)
@@ -255,75 +200,108 @@ open_channel       moveq   #-1,d1
         moveq   #ql_io_open,d0
         trap    #2
         rts
-; Split trailing filename prefix after the last '_' in (A3) into prefix_buf(a3),
-; truncating (A3) to the directory prefix (e.g. "snl6_q" -> "snl6_" + "q").
-; If (A3) has no '_' and DATA_USE is set, copy (A3) to prefix_buf and load DATA_USE.
-split_prefix       move.w  (a3),d1
-        beq.s   sp_done
-        lea     2(a3,d1.w),a0      ; scan backwards from end of path
-        move.w  d1,d0
-        subq.w  #1,d0
-sp_scan            cmpi.b  #'_',-(a0)
-        beq.s   sp_found_under
-        dbra    d0,sp_scan
-        ; No '_' in path: treat entire path as prefix if DATA_USE is available.
-        cmpi.w  #max_name,d1
-        bhi.s   sp_done
-        move.l  sv_datad(a5),d0
-        beq.s   sp_done
+; An explicit qualified path ending in '_' names a directory. Otherwise
+; open its parent and match the final component locally. A bare prefix
+; uses DATA_USE, or the stock fallback when no default is configured.
+select_path        move.l  sv_datad(a5),d0
+        lea     stock_default(pc),a0
+        beq.s   got_default
         movea.l d0,a1
-        move.w  (a1),d2
-        beq.s   sp_done
+        tst.w   (a1)
+        beq.s   got_default
+        movea.l a1,a0
+got_default        move.w  (a3),d1
+        beq.s   path_ready
+        cmpi.w  #5,d1
+        bcs.s   bare_prefix
+        cmpi.b  #'_',6(a3)          ; separator after the four-byte device
+        bne.s   bare_prefix
+        move.b  5(a3),d0
+        subi.b  #'1',d0
+        cmpi.b  #7,d0
+        bhi.s   bare_prefix
+
+        lea     2(a3,d1.w),a1
+        move.w  d1,d2
+split_scan         subq.w  #1,d2
+        cmpi.b  #'_',-(a1)
+        bne.s   split_scan         ; stops at least at the device separator
+        addq.w  #1,d2
+        sub.w   d2,d1              ; length of the filename prefix
+        lea     1(a1),a1
+        move.w  d2,(a3)
+        movea.l a3,a0
+        bra.s   keep_prefix
+
+bare_prefix        lea     2(a3),a1
+keep_prefix        tst.w   d1
+        beq.s   path_ready
+        cmpi.w  #max_name,d1
+        bhi.s   path_bad
         move.w  d1,prefix_len(a3)
-        lea     2(a3),a0
         lea     prefix_buf(a3),a2
         subq.w  #1,d1
-sp_copy_bare       move.b  (a0)+,(a2)+
-        dbra    d1,sp_copy_bare
-        lea     (a3),a2            ; copy DATA_USE into (A3)
-        move.w  d2,(a2)+
-        addq.l  #2,a1
-        subq.w  #1,d2
-spr_copy_dd         move.b  (a1)+,(a2)+
-        dbra    d2,spr_copy_dd
-sp_done            rts
+prefix_copy        move.b  (a1)+,(a2)+
+        dbra    d1,prefix_copy
 
-sp_found_under     addq.w  #1,d0              ; D0 = length including trailing '_'
+        ; Retain the parent path until collection ends, including DATA_USE.
+        move.w  (a0),d1
+        cmpi.w  #line_len-2,d1
+        bhi.s   path_bad
         move.w  d1,d2
-        sub.w   d0,d2              ; D2 = trailing prefix length
-        beq.s   sp_done            ; path already ended with '_'
-        cmpi.w  #max_name,d2
-        bhi.s   sp_done
-        move.w  d0,(a3)            ; truncate directory string at '_'
-        move.w  d2,prefix_len(a3)
-        addq.l  #1,a0              ; first char after '_'
-        lea     prefix_buf(a3),a2
-        subq.w  #1,d2
-spq_copy_pfx        move.b  (a0)+,(a2)+
-        dbra    d2,spq_copy_pfx
+        subq.w  #5,d2
+        bls.s   path_ready
+        move.w  d2,dir_len(a3)
+        cmpa.l  a3,a0
+        beq.s   path_ready
+        movea.l a3,a1
+        move.w  (a0)+,(a1)+
+        subq.w  #1,d1
+parent_copy        move.b  (a0)+,(a1)+
+        dbra    d1,parent_copy
+        movea.l a3,a0
+path_ready         moveq   #0,d0
+        rts
+path_bad           moveq   #ql_err_bp,d0
         rts
 
-; Compare prefix_buf(a3) against hdr_name(a6), case-insensitively.
-; Returns Z=1 (BEQ) if matched (or prefix_len == 0), Z=0 (BNE) if mismatch.
+; Some drivers return full names for subdirectory records. Strip the
+; requested directory prefix for matching only, and preserve printed names.
 match_prefix       move.w  prefix_len(a3),d2
         beq.s   mp_match
-        cmp.w   hdr_nlen(a6),d2
+        move.w  hdr_nlen(a6),d3
+        lea     hdr_name(a6),a2
+        move.w  dir_len(a3),d2
+        beq.s   mp_leaf
+        cmp.w   d3,d2
+        bcc.s   mp_leaf
+        lea     7(a3),a0
+        bsr.s   match_bytes
+        beq.s   mp_strip
+        lea     hdr_name(a6),a2
+        bra.s   mp_leaf
+mp_strip           sub.w   dir_len(a3),d3
+mp_leaf            move.w  prefix_len(a3),d2
+        cmp.w   d3,d2
         bhi.s   mp_nomatch
         lea     prefix_buf(a3),a0
-        lea     hdr_name(a6),a2
-        subq.w  #1,d2
+        bra.s   match_bytes
+mp_match           moveq   #0,d0
+        rts
+mp_nomatch         moveq   #1,d0
+        rts
+
+; Compare D2 bytes at A0 and A2, advancing both pointers.
+match_bytes        subq.w  #1,d2
 mp_loop            move.b  (a0)+,d0
         bsr     fold_letter
         move.b  d0,d1
         move.b  (a2)+,d0
         bsr     fold_letter
         cmp.b   d0,d1
-        bne.s   mp_nomatch
+        bne.s   mp_return
         dbra    d2,mp_loop
-mp_match           moveq   #0,d0
-        rts
-mp_nomatch         moveq   #1,d0
-        rts
+mp_return          rts
 
 ; EXEC passes a word count, that many long channel IDs, then a QDOS string.
 ; The explicit path is stored as a QDOS string in the line buffer.
@@ -418,7 +396,7 @@ get_channel        movem.l a1,-(a7)
 
 gc_smsq            movea.l sv_jobs(a5),a1
         movea.l (a1),a1
-        lea     sb_vars(a1),a1
+        lea     sb_vars(a1),a1      ; SBASIC base relative to job zero's control block
 
 gc_lookup          mulu.w  #bv_chlen,d1       ; D1 = n * entry size ($28)
         move.l  bv_chbas(a1),d0

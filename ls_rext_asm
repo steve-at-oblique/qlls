@@ -131,8 +131,11 @@ bare_name          moveq   #0,d0
 
 path_arg           tst.w   d6
         beq     launch_bp
-        moveq   #0,d2              ; unquoted option text
-        cmpi.b  #'-',0(a6,a1.l)
+        moveq   #0,d2              ; unquoted option or channel text
+        move.b  0(a6,a1.l),d0
+        cmpi.b  #'-',d0
+        beq.s   arg_room
+        cmpi.b  #'#',d0
         beq.s   arg_room
         cmpi.w  #path_max,d6
         bhi     launch_bp
