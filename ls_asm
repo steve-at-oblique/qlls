@@ -32,7 +32,8 @@ hdr_nlen    equ 14
 hdr_name    equ 16
 hdr_date    equ 52
 max_name    equ 36
-line_len    equ 66                  ; 8+1+16+1+36+3+1
+line_len    equ 82                  ; up to 80 output characters plus newline
+search_len  equ 66                  ; length word plus up to 64 path bytes
 
 ; Stack locals relative to the line buffer in A3. QDOS heap traps can clobber A3.
 local_len   equ 64
@@ -43,11 +44,12 @@ entry_head  equ block_head+12
 entry_tail  equ block_head+16
 sort_field  equ block_head+20
 sort_flip   equ block_head+21
-one_col     equ block_head+22
+display_mode equ block_head+22
+column_width equ block_head+23
 prefix_len  equ block_head+24       ; length of filename prefix filter (0 = none)
 prefix_buf  equ block_head+26       ; up to 36 prefix characters
 dir_len     equ block_head+62       ; parent prefix length, excluding device
-search_buf  equ block_head-line_len
+search_buf  equ block_head-search_len
 search_ptr  equ search_buf-4
 work_area   equ search_ptr-line_len
 
@@ -66,6 +68,10 @@ sort_name   equ 0
 sort_size   equ ent_size
 sort_date   equ ent_date
 
+display_bare equ 1
+display_columns equ 2
+display_wide equ 3
+
 start              bra     main
         dc.w    0
         dc.w    $4afb,2
@@ -78,10 +84,10 @@ main
         movea.w #-1,a4              ; use BASIC #1 only if no redirect is supplied
         movea.l a7,a1              ; original EXEC stack
         lea     work_area(a7),a7
-        lea     local_len+line_len+4(a7),a6
+        lea     local_len+search_len+4(a7),a6
         lea     hdr_len(a6),a3
         clr.w   sort_field(a3)     ; name ascending
-        clr.w   one_col(a3)
+        clr.w   display_mode(a3)
         clr.w   prefix_len(a3)
         clr.w   dir_len(a3)
         clr.w   (a3)               ; no explicit path yet
@@ -168,11 +174,11 @@ directory_closed   tst.l   d0
         tst.l   d0
         bne.s   free_all
         movea.l entry_head(a3),a6
+        cmpi.b  #display_columns,display_mode(a3)
+        bcc     print_columns
 
 print_entries      move.l  a6,d0
         beq.s   free_all
-        moveq   #0,d6
-        move.b  ent_nlen(a6),d6
         bsr     format_line
         movea.l a3,a1
         bsr     send_text
@@ -197,6 +203,60 @@ exit_job           move.l  d0,d3
 remove_job         moveq   #-1,d1
         moveq   #ql_mt_frjob,d0
         trap    #1
+
+; Use equal-width columns in sorted order across rows.
+print_columns      move.l  a6,d0
+        beq.s   free_all
+        moveq   #0,d4
+column_measure     movea.l a3,a1
+        bsr     format_name
+        move.l  a1,d2
+        sub.l   a3,d2
+        cmp.w   d4,d2
+        bls.s   column_measured
+        move.w  d2,d4
+column_measured    movea.l ent_next(a6),a6
+        move.l  a6,d0
+        bne.s   column_measure
+        addq.w  #2,d4
+        move.b  d4,column_width(a3)
+        moveq   #66,d5             ; last column needs no trailing gap
+        cmpi.b  #display_wide,display_mode(a3)
+        bne.s   column_fit
+        moveq   #82,d5
+column_fit         divu    d4,d5
+        moveq   #0,d2
+        move.b  display_mode(a3),d2
+        cmp.w   d2,d5
+        bls.s   column_start
+        move.w  d2,d5
+column_start
+        movea.l entry_head(a3),a6
+
+column_row         movea.l a3,a1
+        move.w  d5,d4
+column_item        movea.l a1,a2
+        bsr     format_name
+        movea.l ent_next(a6),a6
+        move.l  a6,d0
+        beq.s   column_end
+        subq.w  #1,d4
+        beq.s   column_end
+        moveq   #0,d2
+        move.b  column_width(a3),d2
+        adda.w  d2,a2
+column_pad         move.b  #' ',(a1)+
+        cmpa.l  a2,a1
+        bcs.s   column_pad
+        bra.s   column_item
+column_end         bsr     end_line
+        movea.l a3,a1
+        bsr     send_text
+        tst.l   d0
+        bne     free_all
+        move.l  a6,d0
+        bne.s   column_row
+        bra     free_all
 
 open_channel       moveq   #-1,d1
         moveq   #ql_io_open,d0
@@ -273,7 +333,7 @@ prefix_copy        move.b  (a1)+,(a2)+
 
         ; Retain the parent path until collection ends, including DATA_USE.
         move.w  (a0),d1
-        cmpi.w  #line_len-2,d1
+        cmpi.w  #search_len-2,d1
         bhi.s   path_bad
         move.w  d1,d2
         subq.w  #5,d2
@@ -347,7 +407,7 @@ arg_next           cmpa.l  a2,a1
         bsr     arg_space
         beq.s   arg_next
         cmpi.b  #'#',d0
-        beq.s   arg_channel
+        beq     arg_channel
         cmpi.b  #'-',d0
         bne     arg_path
         cmpa.l  a2,a1
@@ -357,6 +417,8 @@ arg_next           cmpa.l  a2,a1
 arg_option         move.b  (a1)+,d0
         cmpi.b  #'1',d0
         beq.s   arg_one
+        cmpi.b  #'C',d0
+        beq.s   arg_columns
         cmpi.b  #'r',d0
         beq.s   arg_flip
         moveq   #sort_name,d1
@@ -370,14 +432,23 @@ arg_option         move.b  (a1)+,d0
         bne   arg_error
 arg_field          move.b  d1,sort_field(a3)
         bra.s   arg_more
-arg_one            move.b  #1,one_col(a3)
+arg_one            move.b  #display_bare,display_mode(a3)
+        bra.s   arg_more
+arg_columns        move.b  #display_columns,display_mode(a3)
+        cmpa.l  a2,a1
+        beq.s   args_columns_done
+        cmpi.b  #'3',(a1)
+        bne.s   args_columns_done
+        addq.l  #1,a1
+        move.b  #display_wide,display_mode(a3)
+args_columns_done
         bra.s   arg_more
 arg_flip           move.b  #1,sort_flip(a3)
 arg_more           cmpa.l  a2,a1
         beq   args_done
         bsr   is_space
         bne.s   arg_option
-        bra.s   arg_next
+        bra     arg_next
 
 arg_channel        moveq   #0,d1              ; parsed channel number
         moveq   #0,d2              ; digit count flag
@@ -452,7 +523,7 @@ arg_path           tst.w   (a3)
         bne.s   path_copy
         move.b  d0,d2
         bra.s   path_next
-path_copy          cmpi.w  #line_len-2,d1
+path_copy          cmpi.w  #search_len-2,d1
         beq   arg_error
         move.b  d0,(a0)+
         addq.w  #1,d1
@@ -613,10 +684,10 @@ fold_ql            cmpi.b  #$a0,d0          ; QL accented uppercase letters
         subi.b  #32,d0
 fold_done          rts
 
-; A6 = packed entry, A3 = line buffer, D6.W = filename length.
+; A6 = packed entry, A3 = line buffer.
 ; Returns the number of bytes to send in D2.W.
 format_line        movea.l a3,a1
-        tst.b   one_col(a3)
+        tst.b   display_mode(a3)
         bne.s   name_only
         lea     powers(pc),a2
         move.l  ent_size(a6),d0
@@ -651,25 +722,31 @@ size_done          move.b  #' ',(a1)+
         move.l  ent_date(a6),d0
         bsr     format_date
         move.b  #' ',(a1)+
-name_only       lea  ent_name(a6),a2
+name_only          bsr.s   format_name
+end_line           move.b  #10,(a1)+
+        move.l  a1,d2
+        sub.l   a3,d2
+        rts
+
+; Append a name and its type marker at A1. Preserve A2 for column padding.
+format_name        lea     ent_name(a6),a0
+        moveq   #0,d6
+        move.b  ent_nlen(a6),d6
         subq.w  #1,d6
-copy_name          move.b  (a2)+,(a1)+
+copy_name          move.b  (a0)+,(a1)+
         dbra    d6,copy_name
-        tst.b   one_col(a3)
-        bne.s   end_line
+        cmpi.b  #display_bare,display_mode(a3)
+        beq.s   name_done
         cmpi.b  #-1,ent_type(a6)
         bne.s   check_exec
         move.b  #' ',(a1)+
         move.b  #'-',(a1)+
         move.b  #'>',(a1)+
-        bra.s   end_line
+        bra.s   name_done
 check_exec         cmpi.b  #1,ent_type(a6)
-        bne.s   end_line
+        bne.s   name_done
         move.b  #'*',(a1)+
-end_line           move.b  #10,(a1)+
-        move.l  a1,d2
-        sub.l   a3,d2
-        rts
+name_done          rts
 
 ; D0.L = unsigned seconds from 1961-01-01. The 32-bit range
 ; ends in 2097, so all years divisible by four here are leap years.

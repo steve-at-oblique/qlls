@@ -24,7 +24,7 @@ Copy `ls` from the project root in binary mode to your SNL drive. For example:
 EXEC_W SNL1_ls
 ```
 
-The 1890-byte transfer file contains a 30-byte header and the 1860-byte executable.
+The 2072-byte transfer file contains a 30-byte header and the 2042-byte executable.
 The header specifies QDOS file type 1 and 512 bytes of data space.
 For installation directly on a QL, extract `ls_zip` with QL-aware UnZip
 to restore the executable metadata.
@@ -52,6 +52,28 @@ win1_ql:
   7815 2026-11-27 14:19 qlvi_rext_asm
 ```
 
+Use `-C` for two columns on a stock QL and `-C3` for three on a wider display.
+
+`LS win1_ql,"-C"`
+
+```text
+win1_ql:
+qlbrowser*     qlcat*
+qltcpip        QLTERM*
+qlterm_zip     qlvi*
+qlvi_asm       qlvi_rext
+qlvi_rext_asm
+```
+
+`LS win1_ql,"-C3"`
+
+```text
+win1_ql:
+qlbrowser*     qlcat*         qltcpip
+QLTERM*        qlterm_zip     qlvi*
+qlvi_asm       qlvi_rext      qlvi_rext_asm
+```
+
 ## Command-line options
 
 With Toolkit II or SMSQ/E, pass a command string to `EW` or `EXEC_W`.
@@ -62,12 +84,19 @@ EW SNL4_ls;"-nr snl1_"
 EW SNL4_ls;"-sr"
 EW SNL4_ls;"-tr win1_docs_"
 EW SNL4_ls;"-1 win1_"
+EW SNL4_ls;"-C win1_ql"
+EW SNL4_ls;"-C3 win1_ql"
 EW SNL4_ls;"snl1_a"
 EW SNL4_ls;"#3,snl1_"
 EW SNL4_ls,#3;"-1 snl1_"
 ```
 
 - `-1` prints bare filenames only, one per line, without sizes, dates, or type indicators.
+- `-C` prints filenames with their type indicators in columns, without sizes or
+  dates. The sorted listing reads left to right in up to two columns. Long names
+  fall back to one column if two would exceed 64 characters.
+- `-C3` uses up to three columns in an 80-character row for wider displays.
+  Long names use fewer columns when needed.
 - `-n` sorts by name, A–Z.
 - `-s` sorts by size, smallest first. Directories count as zero bytes.
 - `-t` sorts by modification date, newest first. An absent date sorts oldest.
@@ -78,8 +107,9 @@ When redirecting to a file, use `EW` or `EXEC_W` so the listing finishes
 before you close the output channel.
 
 Combine options or pass them separately. The last field option selects the
-sort field. Equal keys preserve directory order. Supply one device or
-directory to override the default. Keep the native device and directory
+sort field. The last of `-1`, `-C`, and `-C3` selects the display mode. Equal
+keys preserve directory order. Supply one device or directory to override
+the default. Keep the native device and directory
 prefix, including its trailing underscore. Append a filename prefix
 such as `snl1_a` or `win1_docs_a` to filter that directory case-insensitively,
 or supply a bare filename prefix to filter the default directory.
@@ -97,6 +127,7 @@ LRESPR win1_ls_rext
 LS_USE "win1_ls"
 LS win1
 LS win1_,"-s"
+LS win1_ql,"-C"
 LS snl4,"-tr"
 ```
 
