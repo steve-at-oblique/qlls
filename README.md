@@ -24,7 +24,7 @@ Copy `ls` from the project root in binary mode to your SNL drive. For example:
 EXEC_W SNL1_ls
 ```
 
-The 1826-byte transfer file contains a 30-byte header and the 1796-byte executable.
+The 1890-byte transfer file contains a 30-byte header and the 1860-byte executable.
 The header specifies QDOS file type 1 and 512 bytes of data space.
 For installation directly on a QL, extract `ls_zip` with QL-aware UnZip
 to restore the executable metadata.
@@ -32,6 +32,9 @@ to restore the executable metadata.
 Stock QDOS lists `MDV1_`. With Toolkit II or SMSQ/E, LS reads the current
 `DATA_USE` instead. By default, LS writes a newline and then the listing to the main
 BASIC job’s channel `#1`, the default output channel for `DIR`.
+Each listing starts with a left-aligned header showing the search specification
+followed by a colon. The header appears in every output mode, even when no
+files match. With no search operand, the header shows the default directory.
 
 ## Command-line options
 

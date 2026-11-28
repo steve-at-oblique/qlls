@@ -47,7 +47,9 @@ one_col     equ block_head+22
 prefix_len  equ block_head+24       ; length of filename prefix filter (0 = none)
 prefix_buf  equ block_head+26       ; up to 36 prefix characters
 dir_len     equ block_head+62       ; parent prefix length, excluding device
-work_area   equ block_head-line_len
+search_buf  equ block_head-line_len
+search_ptr  equ search_buf-4
+work_area   equ search_ptr-line_len
 
 ; Packed entries are word-aligned. Each block starts with a link to
 ; the previous block. Entries link independently in sorted order.
@@ -76,7 +78,7 @@ main
         movea.w #-1,a4              ; use BASIC #1 only if no redirect is supplied
         movea.l a7,a1              ; original EXEC stack
         lea     work_area(a7),a7
-        lea     local_len(a7),a6
+        lea     local_len+line_len+4(a7),a6
         lea     hdr_len(a6),a3
         clr.w   sort_field(a3)     ; name ascending
         clr.w   one_col(a3)
@@ -162,6 +164,9 @@ close_directory    move.l  d0,-(a7)
         move.l  d1,d0
 directory_closed   tst.l   d0
         bne.s   free_all
+        bsr     print_header
+        tst.l   d0
+        bne.s   free_all
         movea.l entry_head(a3),a6
 
 print_entries      move.l  a6,d0
@@ -169,11 +174,8 @@ print_entries      move.l  a6,d0
         moveq   #0,d6
         move.b  ent_nlen(a6),d6
         bsr     format_line
-        movea.l a4,a0
         movea.l a3,a1
-        moveq   #-1,d3
-        moveq   #io_smul,d0
-        trap    #3
+        bsr     send_text
         tst.l   d0
         bne.s   free_all
         movea.l ent_next(a6),a6
@@ -200,6 +202,21 @@ open_channel       moveq   #-1,d1
         moveq   #ql_io_open,d0
         trap    #2
         rts
+
+print_header       movea.l search_ptr(a3),a1
+        move.w  (a1)+,d2
+        bsr.s   send_text
+        tst.l   d0
+        bne.s   header_done
+        lea     header_end(pc),a1
+        moveq   #2,d2
+send_text          movea.l a4,a0
+        moveq   #-1,d3
+        moveq   #io_smul,d0
+        trap    #3
+header_done        rts
+header_end         dc.b    ':',10
+
 ; An explicit qualified path ending in '_' names a directory. Otherwise
 ; open its parent and match the final component locally. A bare prefix
 ; uses DATA_USE, or the stock fallback when no default is configured.
@@ -210,8 +227,18 @@ select_path        move.l  sv_datad(a5),d0
         tst.w   (a1)
         beq.s   got_default
         movea.l a1,a0
-got_default        move.w  (a3),d1
-        beq.s   path_ready
+got_default        move.l  a0,search_ptr(a3)
+        move.w  (a3),d1
+        beq     path_ready
+        ; Save the full operand before splitting it into parent and filter.
+        lea     search_buf(a3),a1
+        move.l  a1,search_ptr(a3)
+        move.w  d1,(a1)+
+        lea     2(a3),a2
+        move.w  d1,d2
+        subq.w  #1,d2
+search_copy        move.b  (a2)+,(a1)+
+        dbra    d2,search_copy
         cmpi.w  #5,d1
         bcs.s   bare_prefix
         cmpi.b  #'_',6(a3)          ; separator after the four-byte device
