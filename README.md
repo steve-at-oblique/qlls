@@ -36,6 +36,22 @@ Each listing starts with a left-aligned header showing the search specification
 followed by a colon. The header appears in every output mode, even when no
 files match. With no search operand, the header shows the default directory.
 
+Run the resident command `LS win1_ql` to list entries on `win1_` whose names
+start with `ql`.
+
+```text
+win1_ql:
+ 31552 2026-11-20 13:21 qlbrowser*
+  1466 2026-11-27 09:44 qlcat*
+   442 2026-11-18 14:01 qltcpip
+ 13686 2026-11-21 09:17 QLTERM*
+ 14624 2026-11-18 12:46 qlterm_zip
+ 12056 2026-11-27 17:31 qlvi*
+112694 2026-11-27 23:10 qlvi_asm
+   638 2026-11-27 17:32 qlvi_rext
+  7815 2026-11-27 14:19 qlvi_rext_asm
+```
+
 ## Command-line options
 
 With Toolkit II or SMSQ/E, pass a command string to `EW` or `EXEC_W`.
